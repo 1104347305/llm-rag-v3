@@ -2,7 +2,7 @@
 
 ## 1. 背景
 
-当前 `llm-rag-v3` 已经按 Wiki-first RAG 思路实现了本地闭环：
+当前 `llm-wiki-rag` 已经按 Wiki-first RAG 思路实现了本地闭环：
 
 ```text
 wiki/ 或 data/ Markdown 知识层

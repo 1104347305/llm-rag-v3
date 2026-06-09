@@ -85,7 +85,7 @@ def parse_args() -> argparse.Namespace:
     parser = argparse.ArgumentParser(
         description="Concurrently call /rag/answer/stream and save query, answer, TTFT, total time, citations, and raw metadata."
     )
-    parser.add_argument("--input", default='/Users/mickey/project/PA-ALG/llm-rag-v3/docs/评估集.xlsx', help="Input file: .txt, .csv, .jsonl, .json, or .xlsx.")
+    parser.add_argument("--input", default='/Users/mickey/project/PA-ALG/llm-wiki-rag/docs/评估集.xlsx', help="Input file: .txt, .csv, .jsonl, .json, or .xlsx.")
     parser.add_argument(
         "--output",
         default="outputs/rag_answer_results.jsonl",
@@ -93,7 +93,7 @@ def parse_args() -> argparse.Namespace:
     )
     parser.add_argument(
         "--excel-output",
-        default="/Users/mickey/project/PA-ALG/llm-rag-v3/docs/评估集_result.xlsx",
+        default="/Users/mickey/project/PA-ALG/llm-wiki-rag/docs/评估集_result.xlsx",
         help="Excel output path. A timestamp is appended before the extension.",
     )
     parser.add_argument("--url", default="http://localhost:8010/rag/answer/stream", help="Endpoint URL. Defaults to stream or json URL according to --mode.")

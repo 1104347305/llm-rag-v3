@@ -1,5 +1,5 @@
 [project]
-name = "llm-rag-v3"
+name = "llm-wiki-rag"
 version = "0.1.0"
 description = "Local-first production RAG prototype for markdown knowledge bases."
 requires-python = ">=3.11"

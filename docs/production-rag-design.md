@@ -2,7 +2,7 @@
 
 ## 1. 项目定位
 
-`llm-rag-v3` 是面向保险健康服务知识库的本地优先 RAG 服务。当前代码已经实现从维护后的 Markdown 知识层到索引、混合检索、图谱扩展、重排、页面级上下文打包和最终问答的完整闭环。
+`llm-wiki-rag` 是面向保险健康服务知识库的本地优先 RAG 服务。当前代码已经实现从维护后的 Markdown 知识层到索引、混合检索、图谱扩展、重排、页面级上下文打包和最终问答的完整闭环。
 
 核心链路：
 
@@ -84,7 +84,7 @@ wiki/**/*.md 或 data/**/*.md
 ### 3.1 配置环境
 
 ```bash
-cd /Users/mickey/project/PA-ALG/llm-rag-v3
+cd /Users/mickey/project/PA-ALG/llm-wiki-rag
 
 export DASHSCOPE_API_KEY=sk-xxx
 export LLM_MODEL=vanchin/deepseek-v4-pro
@@ -618,7 +618,7 @@ POST /data/process
 ```json
 {
   "project_id": "pingan-zhenxiang",
-  "data_path": "/Users/mickey/project/PA-ALG/llm-rag-v3/data",
+  "data_path": "/Users/mickey/project/PA-ALG/llm-wiki-rag/data",
   "force": true,
   "build_embeddings": true
 }
@@ -695,7 +695,7 @@ POST /rag/answer
 ```text
 RAG_HOST=0.0.0.0
 RAG_PORT=8010
-WIKI_DATA_PATH=/Users/mickey/project/PA-ALG/llm-rag-v3/data
+WIKI_DATA_PATH=/Users/mickey/project/PA-ALG/llm-wiki-rag/data
 RAG_STORAGE_DIR=.rag
 
 ES_URL=http://localhost:9200

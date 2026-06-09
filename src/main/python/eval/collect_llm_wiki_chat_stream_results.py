@@ -218,10 +218,10 @@ def parse_args() -> argparse.Namespace:
     parser = argparse.ArgumentParser(
         description="通过 LLM Wiki chat_stream() 批量生成评估答案并导出 Excel/JSONL。"
     )
-    parser.add_argument("--input", default="/Users/mickey/project/PA-ALG/llm-rag-v3/docs/评估集.xlsx", help="输入文件：XLSX、CSV、JSON、JSONL 或 TXT。")
+    parser.add_argument("--input", default="/Users/mickey/project/PA-ALG/llm-wiki-rag/docs/评估集.xlsx", help="输入文件：XLSX、CSV、JSON、JSONL 或 TXT。")
     parser.add_argument(
         "--output",
-        default="/Users/mickey/project/PA-ALG/llm-rag-v3/docs/评估集_llm_wiki_chat_stream_result.xlsx",
+        default="/Users/mickey/project/PA-ALG/llm-wiki-rag/docs/评估集_llm_wiki_chat_stream_result.xlsx",
         help="结果 Excel 路径，实际文件名会自动追加时间戳。",
     )
     parser.add_argument(
