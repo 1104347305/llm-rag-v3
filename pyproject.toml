@@ -1,0 +1,25 @@
+[project]
+name = "llm-rag-v3"
+version = "0.1.0"
+description = "Local-first production RAG prototype for markdown knowledge bases."
+requires-python = ">=3.11"
+dependencies = [
+  "agno>=2.0",
+  "openai>=1.0",
+  "requests>=2.31",
+]
+
+[project.optional-dependencies]
+api = [
+  "fastapi>=0.115",
+  "uvicorn[standard]>=0.30",
+  "pydantic>=2.7",
+  "python-multipart>=0.0.9",
+  "openpyxl>=3.1",
+  "pyyaml>=6.0",
+  "loguru>=0.7",
+]
+
+[tool.pytest.ini_options]
+pythonpath = ["."]
+testpaths = ["tests"]

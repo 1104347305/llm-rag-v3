@@ -1,0 +1,184 @@
+# ============================================================
+# LLM RAG V3 开发环境配置
+# ============================================================
+# 优先级: YAML > 环境变量 > 默认值
+# 按 ENV 环境变量选择配置文件：
+#   ENV=dev  → dev_app_args.yaml
+#   ENV=stg  → stg_app_args.yaml
+#   ENV=prd  → prd_app_args.yaml
+# ============================================================
+
+# ── HTTP 服务 ──────────────────────────────────────────────
+server:
+  host: "0.0.0.0"              # FastAPI 监听地址，0.0.0.0 接受所有网络接口的连接
+  port: 8010                    # FastAPI 监听端口
+  sync_timeout: 120             # 同步接口超时秒数，超时返回 504
+  stream_log_interval: 100      # 流式输出每多少字打印一次日志
+  max_request_history: 20       # AnswerRequest.history 最大消息条数
+  max_message_chars: 32000      # ChatMessage.content 单条最大字符数
+
+# ── 文件与存储路径 ──────────────────────────────────────────
+paths:
+  default_data_path: "data"     # Markdown 知识库根目录
+  storage_dir: ".rag"           # 索引数据目录（JSON 快照 + SQLite + manifest）
+
+# ── AI 模型选择 ───────────────────────────────────────────
+models:
+  embedding_model: "text-embedding-v4"  # DashScope 嵌入模型名称
+  embedding_dim: 0                      # 向量维度，0 = 自动检测 API 返回维度
+  rerank_model: "qwen3-rerank"          # DashScope 重排序模型名称
+  llm_model: "qwen3.6-35b-a3b"          # LLM 答案生成模型名称
+  llm_reasoning_effort: ""              # LLM 推理深度（low / medium / high），空字符串 = 默认
+
+# ── DashScope API ─────────────────────────────────────────
+dashscope:
+  api_key: "sk-7f21f1884b8649fdbc3a83f8b29c06aa"           # API 密钥
+  embedding_base_url: "https://dashscope.aliyuncs.com/compatible-mode/v1"   # 嵌入 API 地址
+  rerank_base_url: "https://dashscope.aliyuncs.com/compatible-api/v1"      # 重排序 API 地址
+  chat_base_url: "https://dashscope.aliyuncs.com/compatible-mode/v1"       # 对话 API 地址
+  max_retries: 3                # API 调用最大重试次数（指数退避）
+  backoff_base: 0.5             # 重试退避初始等待秒数
+  request_timeout: 60           # 单次 HTTP 请求超时秒数
+  embedding_batch_size: 25      # 批量嵌入每次 API 调用最大文本数
+  fallback_embedding_dim: 384   # API 不可用时 hash 伪嵌入的维度
+
+# ── Elasticsearch ─────────────────────────────────────────
+elasticsearch:
+  url: "http://localhost:9200"  # ES 服务地址，空字符串 = ES 不可用
+  user: ""                      # ES Basic Auth 用户名，空 = 无认证
+  password: ""                  # ES Basic Auth 密码
+  index_prefix: "llm_wiki"      # 索引名前缀，实际为 {prefix}_pages / _chunks / _edges
+  bulk_batch_size: 500          # 批量写入每批最大文档数
+  search_timeout: 30            # 搜索单次请求超时秒数
+  bulk_timeout: 60              # 批量写入单次请求超时秒数
+  title_boost: 3.0              # 搜索时 title 字段 boost 权重
+  heading_boost: 2.0            # 搜索时 heading_path 字段 boost 权重
+
+# ── PostgreSQL / pgvector ──────────────────────────────────
+postgres:
+  host: "localhost"             # PostgreSQL 主机地址，空 = pgvector 不可用
+  port: 5432                    # PostgreSQL 端口
+  database: "rag"               # 数据库名
+  user: "mickey"                # 数据库用户名
+  password: ""                  # 数据库密码
+  vector_ef_search: 200         # HNSW 搜索深度（ef_search），值越大精度越高速度越慢
+  pool_min_size: 2              # 连接池最小连接数
+  pool_max_size: 8              # 连接池最大连接数
+
+# ── 功能开关 ──────────────────────────────────────────────
+features:
+  enable_vector_retrieval: true           # pgvector 语义检索开关
+  enable_es_retrieval: false             # ES BM25 词汇检索开关
+  enable_local_lexical_retrieval: true   # SQLite FTS5 + 中文分词回退开关
+
+# ── 索引构建 ──────────────────────────────────────────────
+indexing:
+  chunker_version: "markdown-aware-local-v1"  # 分块器版本标识，变化触发全量重新分块
+  build_embeddings: false                     # 索引时是否调用 DashScope 生成向量嵌入
+  chunk_target_chars: 1200                    # 分块目标字符数
+  chunk_max_chars: 1500                       # 分块最大字符数
+  chunk_min_chars: 300                        # 分块最小字符数
+  chunk_overlap_chars: 50                     # 相邻块重叠字符数
+  chunk_merge_strategy: "independent"         # auto=小块合并到 target / independent=大块独立小块合并
+  chunk_standalone_threshold: 300             # independent 策略下块 ≥ 此长度独立为一个 chunk
+  graph_max_shared_source_links: 20           # 同 source 图边每页采样上限，防止 O(n²)
+  graph_max_same_type_links: 30               # 同 type 图边每页采样上限
+
+# ── 检索参数 ──────────────────────────────────────────────
+retrieval:
+  default_max_context_size: 204800    # LLM 上下文最大字符预算（token ≈ chars / 1.5）
+  default_top_pages: 10               # 最终返回的最大页面数
+  default_bm25_top_k: 100             # ES BM25 / FTS5 召回的最大 chunk 数
+  default_vector_top_k: 30            # pgvector 语义召回的最大 chunk 数
+  default_rerank_top_k: 50            # 送入重排序模型的候选 chunk 数
+  local_lexical_max_chunks: 50000     # 本地词回退的 chunk 数上限，超此值不执行全量扫描
+  local_vector_max_chunks: 50000      # 本地暴力向量搜索的 chunk 数上限
+  rrf_k: 60.0                         # RRF 融合平滑常数 k，值越大越接近平均融合
+  candidate_load_factor: 3            # 候选加载倍数 = top_pages × this（防止遗漏候选）
+  graph_expand_limit_pages: 20        # 图扩展源页面数上限
+  graph_expand_per_page: 3            # 每页最多引入的新页面数
+  source_chunk_limit: 2               # source 类型页面每页最多保留 chunk 数
+  anchor_chunks_per_page: 3           # 页面聚合时每页取的 anchor chunk 数
+  scored_chunks_per_page: 3           # 候选评分后每页保留的 chunk 数
+  # ── 候选评分权重（6 维度加权，总和 ≈ 1.0）──
+  score_weight_page_rrf: 0.25         # 页面 RRF 排名分数权重
+  score_weight_chunk_rrf: 0.35        # Chunk RRF 排名分数权重
+  score_weight_rerank: 0.20           # DashScope / 本地重排序分数权重
+  score_weight_title_match: 0.10      # 查询-标题匹配度奖励权重
+  score_weight_graph: 0.10            # 图扩展分数权重
+  score_weight_type: 0.05             # Chunk 类型奖励权重（entity/concept/source）
+  # ── 页面聚合参数 ──
+  page_type_entity_boost: 1.18        # entity 类型页面分数乘数（>1.0 提升排序）
+  page_type_concept_boost: 1.08       # concept 类型页面分数乘数
+  page_type_source_boost: 0.72        # source 类型页面分数乘数（<1.0 降低排序）
+  page_title_boost: 0.005             # 查询命中页面内容时的标题奖励
+  page_tail_weight: 0.08              # 页面尾部 chunk 聚合权重（top1 + tail × weight）
+  # ── 中文词汇评分（本地词召回回退）──
+  lexical_exact_title_score: 250.0    # 短语精确匹配标题的基础分
+  lexical_phrase_title_score: 80.0    # 短语包含在标题中的加分
+  lexical_phrase_heading_score: 45.0  # 短语包含在标题中的加分
+  lexical_phrase_content_score: 20.0  # 短语在内容中每次出现加分
+  lexical_phrase_content_limit: 8     # 短语内容出现次数上限（防止长文档加权）
+  lexical_token_title_score: 8.0      # 分词 token 命中标题加分
+  lexical_token_heading_score: 5.0    # 分词 token 命中标题加分
+  lexical_token_content_score: 1.0    # 分词 token 命中内容加分
+  lexical_chunk_type_entity_boost: 1.18    # entity 类型 chunk 词汇评分乘数
+  lexical_chunk_type_concept_boost: 1.1    # concept 类型 chunk 词汇评分乘数
+  lexical_chunk_type_source_boost: 0.82    # source 类型 chunk 词汇评分乘数
+
+# ── 日志 ──────────────────────────────────────────────────
+logging:
+  level: "DEBUG"                # 日志级别（DEBUG / INFO / WARNING / ERROR）
+  file: "logs/dev.log"          # 日志文件路径，空 = 仅输出到 stderr
+
+# ── Agno Agent ────────────────────────────────────────────
+agent:
+  enable_agno_agent: true                           # 是否启用 Agno Agent 编排多轮回答
+  session_db_path: ".rag/agents/sessions.db"        # 会话持久化 SQLite 路径
+  history_runs: 6                                   # 多轮对话保留的历史轮数
+
+# ── 会话管理 ──────────────────────────────────────────────
+session:
+  max_messages: 20              # 服务端每会话最大消息数
+  normalize_max: 12             # normalize_history 截断上限
+  retrieval_history_limit: 5    # build_retrieval_query 取最近 N 条用户消息
+
+# ── 上下文构建 ────────────────────────────────────────────
+context:
+  index_budget_fraction: 0.05         # 页面索引列表占上下文字符预算的比例
+  page_budget_fraction: 0.5           # 页面内容总共占上下文字符预算的比例
+  per_page_budget_fraction: 0.3       # 单页最多占页面预算的比例
+  per_page_budget_floor: 5000         # 单页字符预算下限
+  section_first_threshold: 8000       # 页面内容超此长度触发 section 窗口打包策略
+  section_neighbor_chars: 1000        # section 提取时向上下扩展的字符数
+  page_prefix_chars: 1200             # 页面前缀截断长度（section 策略回退）
+  section_search_fragment_chars: 200  # 模糊匹配时搜索片段的长度
+
+# ── SQLite ────────────────────────────────────────────────
+sqlite:
+  busy_timeout: 5000            # 并发忙等待超时毫秒数
+  in_batch_size: 900            # SQL IN 查询分批大小（SQLite 变量上限 ~999）
+  fts_max_query_terms: 64       # FTS5 查询最大分词数
+
+# ── Token 估算 ────────────────────────────────────────────
+tokenizer:
+  cjk_ratio: 1.5                # 中文：每个 CJK 字符平均对应 token 数
+  ascii_ratio: 4.0              # 英文：每个 ASCII 字符平均对应 token 数
+
+# ── Prompt 模板（修改后重启服务生效）────────────────────────
+prompts:
+  system: |
+    You are a knowledgeable wiki assistant.
+
+    ## Rules
+    - Answer concisely based on the wiki pages below. No lengthy explanations.
+    - If information is missing, say so in one sentence.
+    - Cite sources with [page number] only when needed, e.g. [1].
+
+    ## MANDATORY OUTPUT LANGUAGE: Chinese
+    Write every response entirely in Chinese.
+  rewrite_timeout: 10           # Query 改写 LLM 调用超时秒数
+  rewrite_model: "qwen-plus"    # Query 改写使用的模型
+  query_rewrite_system: "判断用户当前问题是否需要结合对话历史改写为独立检索查询，输出JSON。\n\n【判断标准】\n需要改写(rewrite=true)：问题含代词、省略主语、或无上下文无法独立理解\n不需改写(rewrite=false)：问题已包含完整实体名且语义独立\n\n输出格式：{\"rewrite\": true, \"query\": \"<改写后>\"} 或 {\"rewrite\": false}\n只输出JSON，不要其他内容。"
+  query_rewrite_user_template: "对话历史：\n{history}\n\n用户当前问题：{query}\n\n改写后的独立查询："
+  user_inline_instruction: "直接回答问题，简洁为主，必要时引用来源编号。"

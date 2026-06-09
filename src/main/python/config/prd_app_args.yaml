@@ -1,0 +1,61 @@
+server:
+  host: "0.0.0.0"
+  port: 8010
+
+paths:
+  default_data_path: "data"
+  storage_dir: ".rag"
+
+models:
+  embedding_model: "text-embedding-v4"
+  embedding_dim: 0
+  rerank_model: "qwen3-rerank"
+  llm_model: "qwen3.6-35b-a3b"
+  llm_reasoning_effort: ""
+
+dashscope:
+  api_key: ""
+  embedding_base_url: "https://dashscope.aliyuncs.com/compatible-mode/v1"
+  rerank_base_url: "https://dashscope.aliyuncs.com/compatible-api/v1"
+  chat_base_url: "https://dashscope.aliyuncs.com/compatible-mode/v1"
+
+elasticsearch:
+  url: "${ES_URL:}"
+  user: "${ES_USER:}"
+  password: "${ES_PASSWORD:}"
+  index_prefix: "llm_wiki"
+
+postgres:
+  host: "${PG_HOST:localhost}"
+  port: 5432
+  database: "rag"
+  user: "${PG_USER:postgres}"
+  password: "${PG_PASSWORD:}"
+  vector_ef_search: 200
+
+features:
+  enable_vector_retrieval: true
+  enable_es_retrieval: true
+  enable_local_lexical_retrieval: true
+
+indexing:
+  chunker_version: "markdown-aware-local-v1"
+  build_embeddings: true
+
+retrieval:
+  default_max_context_size: 204800
+  default_top_pages: 8
+  default_bm25_top_k: 300
+  default_vector_top_k: 100
+  default_rerank_top_k: 100
+  local_lexical_max_chunks: 50000
+  local_vector_max_chunks: 50000
+
+logging:
+  level: "WARNING"
+  file: "logs/prd.log"
+
+agent:
+  enable_agno_agent: true
+  session_db_path: ".rag/agents/sessions.db"
+  history_runs: 6

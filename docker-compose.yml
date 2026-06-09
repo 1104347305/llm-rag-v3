@@ -1,0 +1,65 @@
+services:
+  web:
+    build: .
+    ports:
+      - "8010:8010"
+    environment:
+      - ENV=${ENV:-prd}
+      - DASHSCOPE_API_KEY=${DASHSCOPE_API_KEY:-}
+      - ES_URL=${ES_URL:-http://es:9200}
+      - ES_USER=${ES_USER:-}
+      - ES_PASSWORD=${ES_PASSWORD:-}
+      - ENABLE_ES_RETRIEVAL=${ENABLE_ES_RETRIEVAL:-true}
+      - PG_HOST=${PG_HOST:-pg}
+      - PG_PORT=${PG_PORT:-5432}
+      - PG_DATABASE=${PG_DATABASE:-rag}
+      - PG_USER=${PG_USER:-postgres}
+      - PG_PASSWORD=${PG_PASSWORD:-postgres}
+      - ENABLE_VECTOR_RETRIEVAL=${ENABLE_VECTOR_RETRIEVAL:-true}
+      - RAG_STORAGE_DIR=${RAG_STORAGE_DIR:-.rag}
+      - RAG_LOG_LEVEL=${RAG_LOG_LEVEL:-INFO}
+      - ENABLE_AGNO_AGENT=${ENABLE_AGNO_AGENT:-true}
+    volumes:
+      - ./data:/app/data
+      - ./.rag:/app/.rag
+      - ./logs:/app/logs
+    depends_on:
+      pg:
+        condition: service_healthy
+    restart: unless-stopped
+
+  pg:
+    image: pgvector/pgvector:pg17
+    ports:
+      - "5432:5432"
+    environment:
+      - POSTGRES_USER=${PG_USER:-postgres}
+      - POSTGRES_PASSWORD=${PG_PASSWORD:-postgres}
+      - POSTGRES_DB=${PG_DATABASE:-rag}
+    volumes:
+      - pgdata:/var/lib/postgresql/data
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U ${PG_USER:-postgres} -d ${PG_DATABASE:-rag}"]
+      interval: 5s
+      timeout: 3s
+      retries: 5
+
+  es:
+    image: docker.elastic.co/elasticsearch/elasticsearch:8.15.0
+    environment:
+      - discovery.type=single-node
+      - xpack.security.enabled=false
+      - "ES_JAVA_OPTS=-Xms512m -Xmx512m"
+    ports:
+      - "9200:9200"
+    volumes:
+      - esdata:/usr/share/elasticsearch/data
+    healthcheck:
+      test: ["CMD-SHELL", "curl -s http://localhost:9200/_cluster/health | grep -q 'green\|yellow'"]
+      interval: 10s
+      timeout: 5s
+      retries: 10
+
+volumes:
+  pgdata:
+  esdata:
