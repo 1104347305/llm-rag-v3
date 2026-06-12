@@ -20,6 +20,7 @@
 
 from __future__ import annotations
 
+import asyncio
 from dataclasses import replace
 from datetime import datetime, timezone
 from pathlib import Path
@@ -33,14 +34,14 @@ from src.main.python.steps.indexing.embedding_builder import EmbeddingBuilder
 from src.main.python.steps.indexing.graph_builder import GraphBuilder
 from src.main.python.steps.indexing.markdown_parser import MarkdownParser
 from src.main.python.models import Chunk, Page
-from src.main.python.db.elasticsearch import ElasticsearchClient, ElasticsearchUnavailable
-from src.main.python.db.local_store import LocalStore
-from src.main.python.db.pgvector_store import PgVectorStore, PgVectorUnavailable
+from src.main.python.steps.stores.elasticsearch import ElasticsearchClient, ElasticsearchUnavailable
+from src.main.python.steps.stores.local_store import LocalStore
+from src.main.python.steps.stores.faiss_store import FaissStore, FaissUnavailable
+from src.main.python.steps.stores.pgvector_store import PgVectorStore, PgVectorUnavailable
 from src.main.python.utils.hashing import sha256_text, stable_id
-from src.main.python.utils.logging import get_logger, log_event
+from loguru import logger
 
 UTC = timezone.utc
-logger = get_logger(__name__)
 
 
 class IndexBuilder:
@@ -56,7 +57,7 @@ class IndexBuilder:
         """初始化索引构建器。"""
         pass
 
-    def build(self, project_id: str, project_path: Path,
+    async def build(self, project_id: str, project_path: Path,
               force: bool = False, build_embeddings: bool = True) -> dict[str, object]:
         """索引一个 Markdown 知识库项目。
 
@@ -71,14 +72,15 @@ class IndexBuilder:
         """
         root = self._knowledge_root(project_path)
         store = LocalStore.get()
-        old_manifest = store.load_manifest(project_id)
-        log_event(logger, 20, "index.start", "index project started",
-                  project_id=project_id, project_path=str(project_path), root=str(root),
+        old_manifest = await store.load_manifest(project_id)
+        logger.bind(event="index.start").info("index project started", project_id=project_id, project_path=str(project_path), root=str(root),
                   force=force, build_embeddings=build_embeddings,
                   has_old_manifest=bool(old_manifest))
 
         # 加载旧索引用于增量复用
-        old_pages_by_path, old_chunks_by_path = self._load_old_index(store, project_id, old_manifest, force)
+        old_pages_by_path, old_chunks_by_path = await self._load_old_index(
+            store, project_id, old_manifest, force
+        )
 
         indexed_at = datetime.now(UTC).isoformat()
         pages: list[Page] = []
@@ -89,13 +91,15 @@ class IndexBuilder:
         changed_paths: set[str] = set()
 
         chunker = DocumentChunker()
-        files = self._scan_files(project_path)
+        files = await asyncio.to_thread(self._scan_files, project_path)
 
         for path in tqdm(files, desc="索引中", unit="file", ncols=100):
-            text = path.read_text(encoding="utf-8")
+            text, stat = await asyncio.gather(
+                asyncio.to_thread(path.read_text, encoding="utf-8"),
+                asyncio.to_thread(path.stat),
+            )
             relative = path.relative_to(root).as_posix()
             content_sha = sha256_text(text)
-            stat = path.stat()
 
             # 增量复用检查
             old_file = old_manifest.get("files", {}).get(relative, {})
@@ -123,7 +127,9 @@ class IndexBuilder:
                 continue
 
             # 解析 → 分块
-            parsed = MarkdownParser.parse(text, fallback_title=path.stem)
+            parsed = await asyncio.to_thread(
+                MarkdownParser.parse, text, fallback_title=path.stem
+            )
             page_id = str(parsed.metadata.get("dedup_key") or stable_id(relative))
             page = Page(
                 project_id=project_id, page_id=page_id, path=relative,
@@ -132,7 +138,7 @@ class IndexBuilder:
                 content=parsed.body, metadata=parsed.metadata,
                 content_sha256=content_sha, mtime=stat.st_mtime, indexed_at=indexed_at,
             )
-            page_chunks = chunker.chunk(page)
+            page_chunks = await asyncio.to_thread(chunker.chunk, page)
             page.chunk_count = len(page_chunks)
             pages.append(page)
             chunks.extend(page_chunks)
@@ -149,28 +155,35 @@ class IndexBuilder:
             if pending_chunks:
                 texts = [f"Title: {c.title}\nSection: {c.heading_path}\nContent: {c.content}"
                          for c in pending_chunks]
-                vectors = EmbeddingBuilder.batch_embed(texts, dim=settings.embedding_dim)
+                vectors = await EmbeddingBuilder.batch_embed(texts, dim=settings.embedding_dim)
                 for chunk, vector in zip(pending_chunks, vectors):
                     chunk.vector = vector
 
         # 图边
-        edges = GraphBuilder.build(project_id, pages)
+        edges = await asyncio.to_thread(GraphBuilder.build, project_id, pages)
 
         # 删除已不存在的文件
         deleted_paths = set(old_manifest.get("files", {})) - set(manifest_files)
 
         # 持久化
-        store.save_index(project_id, pages, chunks, edges,
-                         changed_paths=changed_paths, deleted_paths=deleted_paths,
-                         rebuild_sqlite=force)
-        store.save_manifest(project_id, self._build_manifest(project_id, manifest_files))
+        await store.save_index(
+            project_id, pages, chunks, edges,
+            changed_paths=changed_paths, deleted_paths=deleted_paths,
+            rebuild_sqlite=force,
+        )
+        await store.save_manifest(
+            project_id, self._build_manifest(project_id, manifest_files)
+        )
 
-        # pgvector
-        pg_indexed, pg_error = self._write_pgvector(project_id, chunks, build_embeddings, deleted_paths)
+        # 向量存储
+        vector_indexed, vector_error = await self._write_vectors(
+            project_id, chunks, build_embeddings, changed_paths, deleted_paths
+        )
 
         # Elasticsearch
-        es_indexed, es_error = self._write_elasticsearch(project_id, pages, chunks, edges,
-                                                          changed_paths, deleted_paths, force)
+        es_indexed, es_error = await self._write_elasticsearch(
+            project_id, pages, chunks, edges, changed_paths, deleted_paths, force
+        )
 
         result = {
             "project_id": project_id,
@@ -180,14 +193,15 @@ class IndexBuilder:
             "files_reused": reused_files,
             "files_reindexed": reindexed_files,
             "files_deleted": len(deleted_paths),
-            "pgvector_indexed": pg_indexed,
-            "pgvector_error": pg_error,
+            "vector_store_type": settings.vector_store_type,
+            "vector_indexed": vector_indexed,
+            "vector_error": vector_error,
             "elasticsearch_indexed": es_indexed,
             "elasticsearch_error": es_error,
             "index_path": str(store.index_path(project_id)),
             "manifest_path": str(store.manifest_path(project_id)),
         }
-        log_event(logger, 20, "index.completed", "index project completed", **result)
+        logger.bind(event="index.completed").info("index project completed", **result)
         return result
 
     # ── 文件扫描 ────────────────────────────────────────────
@@ -210,13 +224,13 @@ class IndexBuilder:
 
     # ── 增量复用 ────────────────────────────────────────────
 
-    def _load_old_index(self, store: LocalStore, project_id: str,
+    async def _load_old_index(self, store: LocalStore, project_id: str,
                          old_manifest: dict, force: bool) -> tuple[dict[str, Page], dict[str, list[Chunk]]]:
         """加载旧索引用于增量复用判断。"""
         if not old_manifest or force:
             return {}, {}
         try:
-            old_pages, old_chunks, _ = store.load_index(project_id)
+            old_pages, old_chunks, _ = await store.load_index(project_id)
             old_pages_by_path = {page.path: page for page in old_pages}
             old_chunks_by_path: dict[str, list[Chunk]] = {}
             for chunk in old_chunks:
@@ -241,49 +255,85 @@ class IndexBuilder:
     # ── 外部存储写入 ────────────────────────────────────────
 
     @staticmethod
-    def _write_pgvector(project_id: str, chunks: list[Chunk],
+    async def _write_vectors(project_id: str, chunks: list[Chunk],
+                             build_embeddings: bool,
+                             changed_paths: set[str],
+                             deleted_paths: set[str]) -> tuple[bool, str | None]:
+        if settings.vector_store_type == "pgvector":
+            return await IndexBuilder._write_pgvector(
+                project_id, chunks, build_embeddings, deleted_paths)
+        return await IndexBuilder._write_faiss(
+            project_id, chunks, build_embeddings, changed_paths, deleted_paths)
+
+    @staticmethod
+    async def _write_faiss(project_id: str, chunks: list[Chunk],
+                            build_embeddings: bool,
+                            changed_paths: set[str],
+                            deleted_paths: set[str]) -> tuple[bool, str | None]:
+        if not (settings.enable_vector_retrieval and build_embeddings):
+            if settings.enable_vector_retrieval:
+                logger.bind(event="index.faiss_skipped").info(
+                    "faiss indexing skipped (build_embeddings disabled)",
+                    project_id=project_id)
+            return False, None
+        try:
+            dim = settings.embedding_dim or 1024
+            faiss_store = FaissStore()
+            faiss_store.init_index(dim)
+            if deleted_paths:
+                await faiss_store.delete_by_paths(project_id, list(deleted_paths))
+            changed_chunks = [c for c in chunks if c.vector and c.path in changed_paths]
+            if changed_chunks:
+                await faiss_store.upsert_vectors(project_id, changed_chunks)
+            return True, None
+        except FaissUnavailable as exc:
+            logger.bind(event="index.faiss_unavailable").warning(
+                "faiss indexing failed", project_id=project_id, error=str(exc))
+            return False, str(exc)
+
+    @staticmethod
+    async def _write_pgvector(project_id: str, chunks: list[Chunk],
                          build_embeddings: bool, deleted_paths: set[str]) -> tuple[bool, str | None]:
         """写入 pgvector（如启用且嵌入已构建）。"""
         if not (settings.pgvector_enabled and build_embeddings):
             if settings.pgvector_enabled:
-                log_event(logger, 20, "index.pgvector_skipped",
-                          "pgvector indexing skipped (build_embeddings disabled)", project_id=project_id)
+                logger.bind(event="index.pgvector_skipped").info("pgvector indexing skipped (build_embeddings disabled)", project_id=project_id)
             return False, None
         try:
             pg_store = PgVectorStore.get()
-            pg_store.init_schema()
-            pg_store.ensure_index()
+            await pg_store.init_schema()
+            await pg_store.ensure_index()
             if deleted_paths:
-                pg_store.delete_by_paths(project_id, list(deleted_paths))
-            pg_store.upsert_vectors(project_id, [chunk for chunk in chunks if chunk.vector])
+                await pg_store.delete_by_paths(project_id, list(deleted_paths))
+            await pg_store.upsert_vectors(project_id, [chunk for chunk in chunks if chunk.vector])
             return True, None
         except PgVectorUnavailable as exc:
-            log_event(logger, 30, "index.pgvector_unavailable",
-                      "pgvector indexing failed", project_id=project_id, error=str(exc))
+            logger.bind(event="index.pgvector_unavailable").warning("pgvector indexing failed", project_id=project_id, error=str(exc))
             return False, str(exc)
 
     @staticmethod
-    def _write_elasticsearch(project_id: str, pages: list[Page], chunks: list[Chunk],
+    async def _write_elasticsearch(project_id: str, pages: list[Page], chunks: list[Chunk],
                               edges: list, changed_paths: set[str], deleted_paths: set[str],
                               force: bool) -> tuple[bool, str | None]:
         """写入 Elasticsearch（如启用）。"""
         if not settings.es_indexing_enabled:
-            log_event(logger, 20, "index.elasticsearch_skipped",
-                      "elasticsearch indexing disabled", project_id=project_id)
+            logger.bind(event="index.elasticsearch_skipped").info("elasticsearch indexing disabled", project_id=project_id)
             return False, None
         try:
-            ElasticsearchClient.get().write_indexes(project_id, pages, chunks, edges,
-                                                     changed_paths=changed_paths,
-                                                     deleted_paths=deleted_paths, rebuild=force)
+            await ElasticsearchClient.get().write_indexes(
+                project_id, pages, chunks, edges,
+                changed_paths=changed_paths,
+                deleted_paths=deleted_paths, rebuild=force,
+            )
             return True, None
         except ElasticsearchUnavailable as exc:
-            log_event(logger, 30, "index.elasticsearch_unavailable",
-                      "elasticsearch indexing failed", project_id=project_id, error=str(exc))
+            logger.bind(event="index.elasticsearch_unavailable").warning("elasticsearch indexing failed", project_id=project_id, error=str(exc))
             return False, str(exc)
 
 
-# 向后兼容
-def index_project(project_id: str, project_path: Path, force: bool = False,
-                  build_embeddings: bool = True) -> dict[str, object]:
-    """向后兼容入口（services/rag_service.py 使用）。"""
-    return IndexBuilder().build(project_id, project_path, force, build_embeddings)
+async def index_project(project_id: str, project_path: Path, force: bool = False,
+                        build_embeddings: bool = True) -> dict[str, object]:
+    """异步兼容入口。"""
+    return await IndexBuilder().build(
+        project_id, project_path, force=force, build_embeddings=build_embeddings
+    )

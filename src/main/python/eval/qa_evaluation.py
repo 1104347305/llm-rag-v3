@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import csv
+import asyncio
 import io
 import json
 import math
@@ -8,8 +9,6 @@ import os
 import re
 import sqlite3
 import time
-import urllib.error
-import urllib.request
 import uuid
 from collections import Counter, defaultdict
 from dataclasses import dataclass
@@ -564,7 +563,7 @@ def _judge_item_with_attempts(
         errors: list[str] = []
         status = "failed"
         try:
-            raw_response = call_minimax_chat(prompt, config)
+            raw_response = asyncio.run(call_minimax_chat(prompt, config))
             parsed = parse_judge_json(raw_response)
             if parsed.get("evaluation_mode") != mode:
                 raise ValueError(f"evaluation_mode mismatch: expected {mode}, got {parsed.get('evaluation_mode')}")
@@ -735,43 +734,35 @@ def build_minimax_judge_prompt(payload: dict[str, Any], previous_error: str = ""
 """.strip()
 
 
-def call_minimax_chat(prompt: str, config: MiniMaxJudgeConfig) -> str:
-    url = f"{config.base_url}/chat/completions"
-    body = {
-        "model": config.model,
-        "messages": [
-            {"role": "system", "content": "你是 QA 评估裁判，只输出严格 JSON。"},
-            {"role": "user", "content": prompt},
-        ],
-        "temperature": config.temperature,
-        "max_tokens": config.max_tokens,
-    }
-    data = json.dumps(body, ensure_ascii=False).encode("utf-8")
-    headers = {
-        "Authorization": f"Bearer {config.api_key}",
-        "Content-Type": "application/json",
-    }
-    if config.workspace:
-        headers["X-DashScope-WorkSpace"] = config.workspace
-    request = urllib.request.Request(
-        url,
-        data=data,
-        headers=headers,
-        method="POST",
+async def call_minimax_chat(prompt: str, config: MiniMaxJudgeConfig) -> str:
+    from openai import AsyncOpenAI
+
+    client = AsyncOpenAI(
+        api_key=config.api_key,
+        base_url=config.base_url,
+        timeout=config.timeout,
+        max_retries=config.retry_count,
+        default_headers=(
+            {"X-DashScope-WorkSpace": config.workspace}
+            if config.workspace else None
+        ),
     )
     try:
-        with urllib.request.urlopen(request, timeout=config.timeout) as response:
-            payload = json.loads(response.read().decode("utf-8"))
-    except urllib.error.HTTPError as exc:
-        detail = exc.read().decode("utf-8", errors="replace")
-        raise RuntimeError(f"MiniMax HTTP {exc.code}: {detail}") from exc
-    except urllib.error.URLError as exc:
-        raise RuntimeError(f"MiniMax request failed: {exc.reason}") from exc
-
-    try:
-        return payload["choices"][0]["message"]["content"]
-    except (KeyError, IndexError, TypeError) as exc:
-        raise RuntimeError(f"MiniMax 响应结构异常：{json.dumps(payload, ensure_ascii=False)[:1000]}") from exc
+        completion = await client.chat.completions.create(
+            model=config.model,
+            messages=[
+                {"role": "system", "content": "你是 QA 评估裁判，只输出严格 JSON。"},
+                {"role": "user", "content": prompt},
+            ],
+            temperature=config.temperature,
+            max_tokens=config.max_tokens,
+        )
+        content = completion.choices[0].message.content
+        if not isinstance(content, str) or not content:
+            raise RuntimeError("MiniMax 响应中没有文本内容")
+        return content
+    finally:
+        await client.close()
 
 
 def parse_judge_json(raw_response: str) -> dict[str, Any]:

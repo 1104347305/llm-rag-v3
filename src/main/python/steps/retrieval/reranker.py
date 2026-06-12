@@ -1,11 +1,10 @@
 from __future__ import annotations
 
 from src.main.python.models import Chunk
-from src.main.python.db.dashscope import DashScopeUnavailable, get_dashscope_client
-from src.main.python.utils.logging import get_logger, log_event
+from src.main.python.services.request_service import DashScopeUnavailable, get_dashscope_client
+from loguru import logger
 from src.main.python.utils.text import tokenize
 
-logger = get_logger(__name__)
 
 
 class Reranker:
@@ -16,7 +15,7 @@ class Reranker:
 
         self._client = get_dashscope_client()
 
-    def score_chunks(self, query: str, chunks: list[Chunk], top_n: int | None = None) -> dict[str, float]:
+    async def score_chunks(self, query: str, chunks: list[Chunk], top_n: int | None = None) -> dict[str, float]:
         """对 chunks 重排序，返回 {chunk_id: score}。"""
         if not chunks:
             return {}
@@ -25,11 +24,9 @@ class Reranker:
             for c in chunks
         ]
         try:
-            results = self._client.rerank(query, documents, top_n=top_n or len(documents))
+            results = await self._client.rerank(query, documents, top_n=top_n or len(documents))
         except DashScopeUnavailable as exc:
-            log_event(logger, 30, "rerank.fallback_local",
-                      "reranker unavailable; using local overlap scorer",
-                      error=str(exc), document_count=len(documents))
+            logger.bind(event="rerank.fallback_local").warning("reranker unavailable; using local overlap scorer", error=str(exc), document_count=len(documents))
             return {c.chunk_id: self._local_score(query, c) for c in chunks}
 
         scores: dict[str, float] = {}
@@ -57,6 +54,6 @@ class Reranker:
         return Reranker._local_score(query, chunk)
 
     @staticmethod
-    def rerank_chunks(query: str, chunks: list[Chunk], top_n: int | None = None) -> dict[str, float]:
+    async def rerank_chunks(query: str, chunks: list[Chunk], top_n: int | None = None) -> dict[str, float]:
         """批量重排序（DashScope 优先，不可用时本地打分）。"""
-        return Reranker().score_chunks(query, chunks, top_n)
+        return await Reranker().score_chunks(query, chunks, top_n)

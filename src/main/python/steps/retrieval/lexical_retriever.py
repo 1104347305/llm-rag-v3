@@ -11,10 +11,9 @@ import re
 from src.main.python.config import settings
 from src.main.python.models import Chunk
 from src.main.python.steps.retrieval.base import BaseRetriever
-from src.main.python.db.local_store import LocalStore
-from src.main.python.utils.logging import get_logger
+from src.main.python.steps.stores.local_store import LocalStore
+from loguru import logger
 
-logger = get_logger(__name__)
 
 
 class LexicalRetriever(BaseRetriever):
@@ -69,7 +68,7 @@ class LexicalRetriever(BaseRetriever):
     # 检索方法
     # ═══════════════════════════════════════════════════════
 
-    def search(self, query: str, project_id: str, top_k: int = 100) -> list[tuple[str, float]]:
+    async def search(self, query: str, project_id: str, top_k: int = 100) -> list[tuple[str, float]]:
         """FTS5 BM25 检索。
 
         要求 project_id 对应的 SQLite 索引已构建（has_sqlite_index 返回 True）。
@@ -83,9 +82,9 @@ class LexicalRetriever(BaseRetriever):
         Returns:
             [(chunk_id, bm25_score), ...]。无索引时返回 []。
         """
-        if not self._store.has_sqlite_index(project_id):
+        if not await self._store.has_sqlite_index(project_id):
             return []
-        return self._store.search_chunks_fts(project_id, query, top_k)
+        return await self._store.search_chunks_fts(project_id, query, top_k)
 
     def is_local_available(self, chunks: list[Chunk]) -> bool:
         """判断本地分词评分是否可用。

@@ -15,7 +15,7 @@ class BaseRetriever(ABC):
     """
 
     @abstractmethod
-    def search(self, query: str, project_id: str, top_k: int) -> list[tuple[str, float]]:
+    async def search(self, query: str, project_id: str, top_k: int) -> list[tuple[str, float]]:
         """执行检索，返回按分数降序排列的 (chunk_id, score) 列表。
 
         Args:

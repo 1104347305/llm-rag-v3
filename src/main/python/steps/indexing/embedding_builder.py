@@ -3,13 +3,12 @@ from __future__ import annotations
 
 import hashlib
 import math
-
+from tqdm import tqdm
 from src.main.python.config import settings
-from src.main.python.db.dashscope import DashScopeUnavailable, get_dashscope_client
-from src.main.python.utils.logging import get_logger, log_event
+from src.main.python.services.request_service import DashScopeUnavailable, get_dashscope_client
+from loguru import logger
 from src.main.python.utils.text import tokenize
 
-logger = get_logger(__name__)
 
 
 class EmbeddingBuilder:
@@ -20,7 +19,7 @@ class EmbeddingBuilder:
     """
 
     @staticmethod
-    def embed(text: str, dim: int = 0) -> list[float]:
+    async def embed(text: str, dim: int = 0) -> list[float]:
         """单条文本嵌入。
 
         Args:
@@ -31,16 +30,15 @@ class EmbeddingBuilder:
             归一化向量列表。
         """
         try:
-            return get_dashscope_client().embed(text)
+            return await get_dashscope_client().embed(text)
         except DashScopeUnavailable as exc:
             fallback_dim = dim or settings.fallback_embedding_dim
-            log_event(logger, 30, "embedding.fallback_hash",
-                      "embedding unavailable; using hash embedding",
-                      error=str(exc), text_chars=len(text), dim=fallback_dim)
+            logger.bind(event="embedding.fallback_hash").warning(
+                f"embedding unavailable; using hash | error={exc} | text_chars={len(text)} | dim={fallback_dim}")
             return EmbeddingBuilder._hash_embed(text, fallback_dim)
 
     @staticmethod
-    def batch_embed(texts: list[str], dim: int = 0, batch_size: int | None = None) -> list[list[float]]:
+    async def batch_embed(texts: list[str], dim: int = 0, batch_size: int | None = None) -> list[list[float]]:
         """批量嵌入，减少 API 调用次数。
 
         Args:
@@ -57,14 +55,13 @@ class EmbeddingBuilder:
             return []
         client = get_dashscope_client()
         all_vectors: list[list[float]] = []
-        for start in range(0, len(texts), batch_size):
+        for start in tqdm(range(0, len(texts), batch_size), desc='embeddings索引更新：'):
             batch = texts[start:start + batch_size]
             try:
-                all_vectors.extend(client.batch_embed(batch))
+                all_vectors.extend(await client.batch_embed(batch))
             except DashScopeUnavailable as exc:
-                log_event(logger, 30, "embedding.batch_fallback",
-                          "batch embedding failed; using hash",
-                          error=str(exc), batch_size=len(batch))
+                logger.bind(event="embedding.batch_fallback").warning(
+                    f"batch embedding failed; using hash | error={exc} | batch_size={len(batch)}")
                 for text in batch:
                     all_vectors.append(EmbeddingBuilder._hash_embed(text, dim or 384))
         return all_vectors
@@ -88,7 +85,6 @@ class EmbeddingBuilder:
 
 
 # 向后兼容
-embed_text = EmbeddingBuilder.embed
-batch_embed_texts = EmbeddingBuilder.batch_embed
 cosine = EmbeddingBuilder.cosine
-hash_embed_text = EmbeddingBuilder._hash_embed
+embed_text = EmbeddingBuilder.embed
+batch_embed = EmbeddingBuilder.batch_embed

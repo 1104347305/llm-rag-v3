@@ -28,6 +28,7 @@
 
 from __future__ import annotations
 
+import asyncio
 import re
 import threading
 
@@ -40,15 +41,16 @@ from src.main.python.steps.retrieval.lexical_retriever import LexicalRetriever
 from src.main.python.steps.retrieval.page_aggregation import aggregate_pages
 from src.main.python.steps.retrieval.reranker import Reranker
 from src.main.python.steps.retrieval.vector_retriever import VectorRetriever
-from src.main.python.db.elasticsearch import ElasticsearchUnavailable
-from src.main.python.db.local_store import LocalStore
-from src.main.python.utils.logging import get_logger, log_event
+from src.main.python.steps.stores.elasticsearch import ElasticsearchUnavailable
+from src.main.python.steps.stores.local_store import LocalStore
+from loguru import logger
 from src.main.python.utils.timers import timer, trace
 
-logger = get_logger(__name__)
 
 
 class RetrievalPipeline:
+    _instance: RetrievalPipeline | None = None
+    _lock = threading.Lock()
     """混合检索 Pipeline，通过依赖注入组装各模块。
 
     使用示例:
@@ -56,26 +58,6 @@ class RetrievalPipeline:
         pipeline = RetrievalPipeline(es=custom_es, vector=...)    # 注入自定义模块
         result = pipeline.retrieve("my-project", "保险查询", top_pages=5)
     """
-
-    # ── 常量 ────────────────────────────────────────────────
-
-    TRIM_PUNCT_RE: re.Pattern = re.compile(
-        r"^[\s,，。！？、；：\"'（）()\-_/\\·~～…]+|[\s,，。！？、；：\"'（）()\-_/\\·~～…]+$"
-    )
-    """标点修剪正则，用于 _title_match_boost 查询/标题归一化。"""
-
-    _instance: RetrievalPipeline | None = None
-    """全局单例，由 get() 延迟初始化。"""
-    _lock = threading.Lock()
-
-    @classmethod
-    def get(cls) -> RetrievalPipeline:
-        """获取全局单例（线程安全），首次调用时初始化。"""
-        if cls._instance is None:
-            with cls._lock:
-                if cls._instance is None:
-                    cls._instance = cls()
-        return cls._instance
 
     def __init__(self,
                  store: LocalStore | None = None,
@@ -96,32 +78,41 @@ class RetrievalPipeline:
             graph_expander: 图扩展器。
             ctx_builder: 上下文构建器。
         """
-        self._store = store or LocalStore.get()
-        self._es = es or EsRetriever()
-        self._vector = vector or VectorRetriever()
-        self._lexical = lexical or LexicalRetriever()
-        self._reranker = reranker or Reranker()
-        self._graph_expander = graph_expander or GraphExpander()
-        self._ctx_builder = ctx_builder or ContextBuilder()
+        self.store = store or LocalStore.get()
+        self.esRetriever = es or EsRetriever()
+        self.vectorRetriever = vector or VectorRetriever()
+        self.lexicalRetriever = lexical or LexicalRetriever()
+        self.reranker = reranker or Reranker()
+        self.graph_expander = graph_expander or GraphExpander()
+        self.ctx_builder = ctx_builder or ContextBuilder()
+        self._answer_agent = None
+        self.TRIM_PUNCT_RE: re.Pattern = re.compile(
+            r"^[\s,，。！？、；：\"'（）()\-_/\\·~～…]+|[\s,，。！？、；：\"'（）()\-_/\\·~～…]+$"
+        )
+
+    @classmethod
+    def get(cls) -> RetrievalPipeline:
+        if cls._instance is None:
+            with cls._lock:
+                if cls._instance is None:
+                    cls._instance = cls()
+        return cls._instance
 
     # ── 检索代理（可供测试 mock）───────────────────────────
 
-    def _bm25_search(self, query: str, project_id: str, top_k: int = 100) -> list[tuple[str, float]]:
+    async def bm25_search(self, query: str, project_id: str, top_k: int = 100) -> list[tuple[str, float]]:
         """ES BM25 检索代理。"""
-        return self._es.search(query, project_id, top_k)
+        return await self.esRetriever.search(query, project_id, top_k)
 
-    def _vector_search_pgvector(self, query: str, project_id: str, top_k: int = 100) -> list[tuple[str, float]]:
-        """pgvector 语义检索代理。"""
-        return self._vector.search(query, project_id, top_k)
+    async def vector_search_store(self, query: str, project_id: str, top_k: int = 100) -> list[tuple[str, float]]:
+        """向量存储语义检索代理。"""
+        return await self.vectorRetriever.search(query, project_id, top_k)
 
-    @staticmethod
-    def _vector_search(query: str, chunks: list[Chunk], top_k: int = 100) -> list[tuple[str, float]]:
+    async def vector_search(self, query: str, chunks: list[Chunk], top_k: int = 100) -> list[tuple[str, float]]:
         """本地暴力向量检索代理。"""
-        return VectorRetriever.search_local(query, chunks, top_k)
+        return await self.vectorRetriever.search_local(query, chunks, top_k)
 
-    # ── 公共入口 ────────────────────────────────────────────
-
-    def retrieve(self,
+    async def retrieve(self,
                  project_id: str, query: str,
                  max_context_size: int | None = None,
                  top_pages: int | None = None,
@@ -169,57 +160,46 @@ class RetrievalPipeline:
         use_vector = settings.enable_vector_retrieval if include_vector is None else include_vector
         use_lexical = settings.enable_local_lexical_retrieval if include_lexical is None else include_lexical
 
-        log_event(logger, 20, "retrieval.start", "retrieve context started",
-                  project_id=project_id, query_length=len(query),
+        logger.bind(event="retrieval.start").info("retrieve context started", project_id=project_id, query_length=len(query),
                   max_context_size=max_context_size, top_pages=top_pages,
                   bm25_top_k=bm25_top_k, vector_top_k=vector_top_k, rerank_top_k=rerank_top_k,
                   use_es=use_es, use_vector=use_vector, use_lexical=use_lexical,
                   include_graph=include_graph, include_neighbor_chunks=include_neighbor_chunks)
 
-        # ── 路 1: ES BM25（词汇精确匹配）─────────────────────────
-        with trace(metrics, "bm25_latency_ms", logger, "ES BM25 词汇检索",
-                   input=dict(query=query, top_k=bm25_top_k)) as out:
-            bm25_results: list[tuple[str, float]] = []
-            if use_es:
-                try:
-                    bm25_results = self._bm25_search(query, project_id, bm25_top_k)
-                    out["count"] = len(bm25_results)
-                    out["top_scores"] = [s for _, s in bm25_results[:3]]
-                except ElasticsearchUnavailable as exc:
-                    out["error"] = str(exc)
-            else:
-                out["status"] = "disabled"
+        async def run_bm25() -> list[tuple[str, float]]:
+            if not use_es:
+                return []
+            try:
+                return await self.bm25_search(query, project_id, bm25_top_k)
+            except ElasticsearchUnavailable as exc:
+                reasons.append(f"elasticsearch_unavailable: {exc}")
+                return []
 
-        # ── 路 2: pgvector（语义相似度）──────────────────────────
-        with trace(metrics, "vector_latency_ms", logger, "pgvector 语义检索",
-                   input=dict(query=query, top_k=vector_top_k)) as out:
-            vector_results: list[tuple[str, float]] = []
-            if use_vector:
-                vector_results = self._vector_search_pgvector(query, project_id, vector_top_k)
-                out["count"] = len(vector_results)
-                out["top_scores"] = [round(s, 4) for _, s in vector_results[:3]]
-            else:
-                out["status"] = "disabled"
+        async def run_vector() -> list[tuple[str, float]]:
+            if not use_vector:
+                return []
+            return await self.vector_search_store(query, project_id, vector_top_k)
 
-        # ── 路 3: SQLite FTS5（本地全文搜索）─────────────────────
-        with trace(metrics, "fts5_latency_ms", logger, "FTS5 本地全文搜索",
-                   input=dict(query=query, top_k=bm25_top_k)) as out:
-            fts5_results: list[tuple[str, float]] = []
-            if use_lexical and self._store.has_sqlite_index(project_id):
-                fts5_results = self._lexical.search(query, project_id, bm25_top_k)
-                out["count"] = len(fts5_results)
-                out["top_scores"] = [round(s, 2) for _, s in fts5_results[:3]]
-            else:
-                out["status"] = "disabled" if not use_lexical else "no_index"
+        async def run_fts5() -> list[tuple[str, float]]:
+            if not use_lexical:
+                return []
+            return await self.lexicalRetriever.search(query, project_id, bm25_top_k)
+
+        started = asyncio.get_running_loop().time()
+        bm25_results, vector_results, fts5_results = await asyncio.gather(
+            run_bm25(), run_vector(), run_fts5()
+        )
+        metrics["recall_latency_ms"] = round(
+            (asyncio.get_running_loop().time() - started) * 1000, 3
+        )
 
         # ── 路由决策：候选路径 vs 兜底路径 ──
         has_candidates = bool(bm25_results or vector_results or fts5_results)
-        if has_candidates and self._store.has_sqlite_index(project_id):
-            log_event(logger, 20, "retrieval.mode", "hybrid candidate retrieval",
-                      project_id=project_id, mode="candidate_sqlite",
+        if has_candidates and await self.store.has_sqlite_index(project_id):
+            logger.bind(event="retrieval.mode").info("hybrid candidate retrieval", project_id=project_id, mode="candidate_sqlite",
                       bm25_count=len(bm25_results), vector_count=len(vector_results),
                       fts5_count=len(fts5_results), reasons=reasons)
-            return self._retrieve_from_candidates(
+            return await self.retrieve_from_candidates(
                 project_id=project_id, query=query,
                 bm25_results=bm25_results, vector_results=vector_results,
                 fts5_results=fts5_results,
@@ -229,7 +209,7 @@ class RetrievalPipeline:
                 debug=debug, metrics=metrics, reasons=reasons)
 
         # ── 兜底路径：全量加载 + 词召回 + 暴力向量 ─────────────
-        return self._full_local_fallback(
+        return await self.full_local_fallback(
             project_id=project_id, query=query,
             max_context_size=max_context_size, top_pages=top_pages,
             rerank_top_k=rerank_top_k, include_graph=include_graph,
@@ -240,7 +220,7 @@ class RetrievalPipeline:
 
     # ── 候选路径 ────────────────────────────────────────────
 
-    def _retrieve_from_candidates(
+    async def retrieve_from_candidates(
         self, project_id: str, query: str,
         bm25_results: list[tuple[str, float]],
         vector_results: list[tuple[str, float]],
@@ -255,9 +235,9 @@ class RetrievalPipeline:
                    input=dict(candidate_ids=len(bm25_results)+len(vector_results)+len(fts5_results))) as out:
             all_results = bm25_results + vector_results + fts5_results
             chunk_ids = [cid for cid, _ in all_results[:max(rerank_top_k, top_pages * settings.candidate_load_factor)]]
-            chunks = self._store.load_chunks_by_ids(project_id, chunk_ids)
+            chunks = await self.store.load_chunks_by_ids(project_id, chunk_ids)
             chunks_by_id = {chunk.chunk_id: chunk for chunk in chunks}
-            pages = self._store.load_pages_by_ids(project_id, [chunk.page_id for chunk in chunks])
+            pages = await self.store.load_pages_by_ids(project_id, [chunk.page_id for chunk in chunks])
             pages_by_id = {page.page_id: page for page in pages}
             out["chunks"] = len(chunks_by_id)
             out["pages"] = len(pages_by_id)
@@ -265,13 +245,15 @@ class RetrievalPipeline:
         # 步骤 2: RRF 融合
         with trace(metrics, "rrf_latency_ms", logger, "RRF 多路融合",
                    input=dict(bm25=len(bm25_results), vector=len(vector_results), fts5=len(fts5_results))) as out:
-            fused = RetrievalPipeline.rrf_fuse({"bm25": bm25_results, "vector": vector_results, "fts5": fts5_results})
+            fused = self.rrf_fuse({"bm25": bm25_results, "vector": vector_results, "fts5": fts5_results})
             out["fused"] = len(fused)
 
         # 步骤 3: 页面聚合（chunk → page 分组打分）
         with trace(metrics, "page_aggregation_latency_ms", logger, "页面聚合",
                    input=dict(fused_chunks=len(fused))) as out:
-            page_results = aggregate_pages(fused, chunks_by_id, pages_by_id)
+            page_results = await asyncio.to_thread(
+                aggregate_pages, fused, chunks_by_id, pages_by_id
+            )
             out["pages"] = len(page_results)
 
         # 步骤 4: 图扩展
@@ -279,14 +261,16 @@ class RetrievalPipeline:
         if include_graph:
             with trace(metrics, "graph_latency_ms", logger, "图扩展",
                        input=dict(candidate_pages=min(settings.graph_expand_limit_pages, len(page_results)))) as out:
-                edges = self._store.load_edges_for_pages(
+                edges = await self.store.load_edges_for_pages(
                     project_id,
                     [str(item["page_id"]) for item in page_results[:settings.graph_expand_limit_pages]],
                 )
-                graph_expansions = self._graph_expander.expand(page_results, edges)
-                for page in self._store.load_pages_by_ids(project_id, [str(e["page_id"]) for e in graph_expansions if str(e["page_id"]) not in pages_by_id]):
+                graph_expansions = await asyncio.to_thread(
+                    self.graph_expander.expand, page_results, edges
+                )
+                for page in await self.store.load_pages_by_ids(project_id, [str(e["page_id"]) for e in graph_expansions if str(e["page_id"]) not in pages_by_id]):
                     pages_by_id[page.page_id] = page
-                for chunk in self._store.load_chunks_for_pages(project_id, [str(e["page_id"]) for e in graph_expansions]):
+                for chunk in await self.store.load_chunks_for_pages(project_id, [str(e["page_id"]) for e in graph_expansions]):
                     chunks_by_id[chunk.chunk_id] = chunk
                 out["edges"] = len(edges)
                 out["expanded_pages"] = len(graph_expansions)
@@ -297,11 +281,11 @@ class RetrievalPipeline:
             candidate_chunk_ids = [str(item["id"]) for item in fused[:rerank_top_k]]
             for expansion in graph_expansions:
                 candidate_chunk_ids.extend(
-                    RetrievalPipeline._best_chunks_for_page(str(expansion["page_id"]), query, list(chunks_by_id.values())))
-            selected = RetrievalPipeline._score_candidates(
-                query, candidate_chunk_ids, chunks_by_id, page_results, graph_expansions, fused)[:top_pages]
+                    self.best_chunks_for_page(str(expansion["page_id"]), query, list(chunks_by_id.values())))
+            selected = (await self.score_candidates(
+                query, candidate_chunk_ids, chunks_by_id, page_results, graph_expansions, fused))[:top_pages]
             if not selected:
-                selected = RetrievalPipeline._overview_fallback(list(pages_by_id.values()), list(chunks_by_id.values()))
+                selected = self.overview_fallback(list(pages_by_id.values()), list(chunks_by_id.values()))
             out["selected_pages"] = len(selected)
             out["titles"] = [
                 pages_by_id.get(str(s["page_id"])).title if str(s["page_id"]) in pages_by_id else "?"
@@ -309,18 +293,20 @@ class RetrievalPipeline:
 
         # 步骤 6: 相邻块扩展
         if include_neighbor_chunks:
-            self._load_neighbor_candidates(project_id, selected, chunks_by_id)
+            await self.load_neighbor_candidates(project_id, selected, chunks_by_id)
             for item in selected:
                 page = pages_by_id[str(item["page_id"])]
                 if page.type == "source":
                     item["chunk_ids"] = item["chunk_ids"][:settings.source_chunk_limit]
                 else:
-                    item["chunk_ids"] = RetrievalPipeline.expand_neighbor_chunks(item["chunk_ids"], chunks_by_id)
+                    item["chunk_ids"] = self.expand_neighbor_chunks(item["chunk_ids"], chunks_by_id)
 
         # 步骤 7: 上下文构建
         with trace(metrics, "context_build_latency_ms", logger, "上下文构建",
                    input=dict(max_size=max_context_size)) as out:
-            response = self._ctx_builder.build(selected, chunks_by_id, pages_by_id, max_context_size)
+            response = await asyncio.to_thread(
+                self.ctx_builder.build, selected, chunks_by_id, pages_by_id, max_context_size
+            )
             pages_context = response.get("pages_context", "")
             out["context_chars"] = len(str(pages_context)) if pages_context else 0
 
@@ -344,7 +330,7 @@ class RetrievalPipeline:
 
     # ── 兜底路径 ────────────────────────────────────────────
 
-    def _full_local_fallback(
+    async def full_local_fallback(
         self, project_id: str, query: str,
         max_context_size: int, top_pages: int, rerank_top_k: int,
         include_graph: bool, include_neighbor_chunks: bool,
@@ -352,9 +338,8 @@ class RetrievalPipeline:
         debug: bool, metrics: dict[str, float], reasons: list[str],
     ) -> dict[str, object]:
         """兜底路径：全量内存加载 → 词召回/暴力向量 → RRF → 评分 → 上下文。"""
-        pages, chunks, edges = self._store.load_index(project_id)
-        log_event(logger, 20, "retrieval.mode", "full local index retrieval",
-                  project_id=project_id, mode="full_local",
+        pages, chunks, edges = await self.store.load_index(project_id)
+        logger.bind(event="retrieval.mode").info("full local index retrieval", project_id=project_id, mode="full_local",
                   page_count=len(pages), chunk_count=len(chunks), edge_count=len(edges))
 
         chunks_by_id = {chunk.chunk_id: chunk for chunk in chunks}
@@ -364,40 +349,46 @@ class RetrievalPipeline:
         with timer(metrics, "lexical_latency_ms"):
             lexical_results: list[tuple[str, float]] = []
             if chunks and len(chunks) <= settings.local_lexical_max_chunks:
-                lexical_results = LexicalRetriever.search_local(query, chunks, bm25_top_k)
+                lexical_results = await asyncio.to_thread(
+                    self.lexicalRetriever.search_local, query, chunks, bm25_top_k
+                )
             reasons.append(f"lexical_fallback: {len(lexical_results)} results")
 
         # 本地暴力向量搜索
         with timer(metrics, "vector_bruteforce_latency_ms"):
             full_vector_results: list[tuple[str, float]] = []
             if use_vector and len(chunks) <= settings.local_vector_max_chunks:
-                full_vector_results = RetrievalPipeline._vector_search(query, chunks, vector_top_k)
+                full_vector_results = await self.vector_search(query, chunks, vector_top_k)
 
         # RRF 融合
         with timer(metrics, "rrf_latency_ms"):
-            fused = RetrievalPipeline.rrf_fuse(
+            fused = self.rrf_fuse(
                 {"bm25": [], "lexical": lexical_results, "vector": full_vector_results})
 
         # 页面聚合
         with timer(metrics, "page_aggregation_latency_ms"):
-            page_results = aggregate_pages(fused, chunks_by_id, pages_by_id)
+            page_results = await asyncio.to_thread(
+                aggregate_pages, fused, chunks_by_id, pages_by_id
+            )
 
         # 图扩展
         graph_expansions: list[dict[str, object]] = []
         if include_graph:
             with timer(metrics, "graph_latency_ms"):
-                graph_expansions = self._graph_expander.expand(page_results, edges)
+                graph_expansions = await asyncio.to_thread(
+                    self.graph_expander.expand, page_results, edges
+                )
 
         # 候选评分
         chunks_list = list(chunks_by_id.values())
         candidate_chunk_ids = [str(item["id"]) for item in fused[:rerank_top_k]]
         for expansion in graph_expansions:
             candidate_chunk_ids.extend(
-                RetrievalPipeline._best_chunks_for_page(str(expansion["page_id"]), query, chunks_list))
-        selected = RetrievalPipeline._score_candidates(
-            query, candidate_chunk_ids, chunks_by_id, page_results, graph_expansions, fused)[:top_pages]
+                self.best_chunks_for_page(str(expansion["page_id"]), query, chunks_list))
+        selected = (await self.score_candidates(
+            query, candidate_chunk_ids, chunks_by_id, page_results, graph_expansions, fused))[:top_pages]
         if not selected:
-            selected = RetrievalPipeline._overview_fallback(pages, chunks_list)
+            selected = self.overview_fallback(pages, chunks_list)
 
         # 相邻块扩展
         if include_neighbor_chunks:
@@ -406,11 +397,13 @@ class RetrievalPipeline:
                 if page.type == "source":
                     item["chunk_ids"] = item["chunk_ids"][:settings.source_chunk_limit]
                 else:
-                    item["chunk_ids"] = RetrievalPipeline.expand_neighbor_chunks(item["chunk_ids"], chunks_by_id)
+                    item["chunk_ids"] = self.expand_neighbor_chunks(item["chunk_ids"], chunks_by_id)
 
         # 上下文构建
         with timer(metrics, "context_build_latency_ms"):
-            response = self._ctx_builder.build(selected, chunks_by_id, pages_by_id, max_context_size)
+            response = await asyncio.to_thread(
+                self.ctx_builder.build, selected, chunks_by_id, pages_by_id, max_context_size
+            )
 
         response["metrics"] = metrics
         response["retrieval_mode"] = "full_local"
@@ -424,9 +417,7 @@ class RetrievalPipeline:
             }
         return response
 
-    # ── 辅助方法 ────────────────────────────────────────────
-
-    def _load_neighbor_candidates(self, project_id: str,
+    async def load_neighbor_candidates(self, project_id: str,
                                    selected: list[dict[str, object]],
                                    chunks_by_id: dict[str, Chunk]) -> None:
         """从 SQLite 加载选中页面相邻块的 Chunk 对象到查找表中。"""
@@ -441,21 +432,17 @@ class RetrievalPipeline:
                 if chunk.next_chunk_id:
                     neighbor_ids.append(chunk.next_chunk_id)
         missing = [cid for cid in dict.fromkeys(neighbor_ids) if cid not in chunks_by_id]
-        for chunk in self._store.load_chunks_by_ids(project_id, missing):
+        for chunk in await self.store.load_chunks_by_ids(project_id, missing):
             chunks_by_id[chunk.chunk_id] = chunk
 
-    # ── 静态辅助方法 ────────────────────────────────────────
-
-    @staticmethod
-    def _best_chunks_for_page(page_id: str, query: str, chunks: list[Chunk]) -> list[str]:
+    def best_chunks_for_page(self, page_id: str, query: str, chunks: list[Chunk]) -> list[str]:
         """找到指定页面中 rerank_score 最高的 1 个 chunk_id（图扩展的页面代表）。"""
         page_chunks = [chunk for chunk in chunks if chunk.page_id == page_id]
-        ranked = sorted(page_chunks, key=lambda chunk: Reranker.rerank_score(query, chunk), reverse=True)
+        ranked = sorted(page_chunks, key=lambda chunk: self.reranker.rerank_score(query, chunk), reverse=True)
         return [chunk.chunk_id for chunk in ranked[:1]]
 
-    @staticmethod
-    def _score_candidates(
-        query: str, candidate_chunk_ids: list[str], chunks_by_id: dict[str, Chunk],
+    async def score_candidates(
+        self, query: str, candidate_chunk_ids: list[str], chunks_by_id: dict[str, Chunk],
         page_results: list[dict[str, object]], graph_expansions: list[dict[str, object]],
         fused_chunks: list[dict[str, object]],
     ) -> list[dict[str, object]]:
@@ -473,7 +460,7 @@ class RetrievalPipeline:
         max_chunk_rrf = max(chunk_rrf.values(), default=1.0)
 
         ordered_candidate_chunks = [chunks_by_id[cid] for cid in dict.fromkeys(candidate_chunk_ids) if cid in chunks_by_id]
-        rerank_scores = Reranker.rerank_chunks(query, ordered_candidate_chunks)
+        rerank_scores = await self.reranker.rerank_chunks(query, ordered_candidate_chunks)
 
         grouped: dict[str, dict[str, object]] = {}
         for chunk_id in dict.fromkeys(candidate_chunk_ids):
@@ -484,7 +471,7 @@ class RetrievalPipeline:
                 settings.score_weight_page_rrf * page_rrf.get(chunk.page_id, 0.0) / max_rrf
                 + settings.score_weight_chunk_rrf * chunk_rrf.get(chunk.chunk_id, 0.0) / max_chunk_rrf
                 + settings.score_weight_rerank * rerank_scores.get(chunk.chunk_id, 0.0)
-                + settings.score_weight_title_match * RetrievalPipeline._title_match_boost(query, chunk.title)
+                + settings.score_weight_title_match * self.title_match_boost(query, chunk.title)
                 + settings.score_weight_graph * min(1.0, graph_scores.get(chunk.page_id, 0.0) / 4.0)
                 + settings.score_weight_type * (1.0 if chunk.type in {"entity", "concept", "source"} else 0.5)
             )
@@ -502,10 +489,9 @@ class RetrievalPipeline:
             selected.append(entry)
         return sorted(selected, key=lambda item: float(item["score"]), reverse=True)
 
-    @staticmethod
-    def _title_match_boost(query: str, title: str) -> float:
+    def title_match_boost(self, query: str, title: str) -> float:
         """查询与页面标题匹配度奖励：精确=1.0，包含=0.75，无=0.0。"""
-        query_phrase = RetrievalPipeline.TRIM_PUNCT_RE.sub("", query.strip().lower())
+        query_phrase = self.TRIM_PUNCT_RE.sub("", query.strip().lower())
         title_lower = title.strip().lower()
         if not query_phrase or not title_lower:
             return 0.0
@@ -515,8 +501,7 @@ class RetrievalPipeline:
             return 0.75
         return 0.0
 
-    @staticmethod
-    def _overview_fallback(pages: list[Page], chunks: list[Chunk]) -> list[dict[str, object]]:
+    def overview_fallback(self, pages: list[Page], chunks: list[Chunk]) -> list[dict[str, object]]:
         """无页面选中时回退到 overview.md 的前 3 个 chunk。"""
         overview = next((page for page in pages
                          if page.path.endswith("overview.md") or page.title.lower() == "overview"), None)
@@ -525,8 +510,7 @@ class RetrievalPipeline:
         chunk_ids = [chunk.chunk_id for chunk in chunks if chunk.page_id == overview.page_id][:3]
         return [{"page_id": overview.page_id, "score": 0.0, "chunk_ids": chunk_ids, "source": "overview"}]
 
-    @staticmethod
-    def rrf_fuse(rankings: dict[str, list[tuple[str, float]]],
+    def rrf_fuse(self, rankings: dict[str, list[tuple[str, float]]],
                  k: float | None = None) -> list[dict[str, object]]:
         """RRF (Reciprocal Rank Fusion) 多路结果融合。
 
@@ -549,8 +533,7 @@ class RetrievalPipeline:
                 entry["raw_scores"][source] = raw_score
         return sorted(fused.values(), key=lambda item: float(item["score"]), reverse=True)
 
-    @staticmethod
-    def expand_neighbor_chunks(chunk_ids: list[str],
+    def expand_neighbor_chunks(self, chunk_ids: list[str],
                                chunks_by_id: dict[str, Chunk]) -> list[str]:
         """为每个 chunk 扩展前后相邻块，保持顺序并去重。
 
@@ -568,3 +551,53 @@ class RetrievalPipeline:
                     ordered.append(candidate)
         return ordered
 
+    async def answer_query(
+            self,
+            project_id: str,
+            query: str,
+            session_id: str | None = None,
+            user_id: str | None = None,
+            history: list[dict[str, str]] | None = None,
+            retrieval_query: str | None = None,
+            **context_kwargs: object,
+    ) -> dict[str, object]:
+        """检索 + LLM 问答入口：记录日志后委托给 AgnoRAGAgent。"""
+        # 延迟导入，避免 rag_agent -> pipeline -> rag_agent 循环依赖。
+        from src.main.python.steps.agents.rag_agent import AgnoRAGAgent
+
+        logger.bind(event="answer.start").info(
+            "answer query started",
+            project_id=project_id,
+            query_length=len(query),
+            session_id=session_id,
+            user_id=user_id,
+            history_turn_count=len(history or []),
+            context_kwargs=context_kwargs,
+        )
+        if getattr(self, "_answer_agent", None) is None:
+            self._answer_agent = AgnoRAGAgent()
+        result = await self._answer_agent.answer(
+            project_id=project_id,
+            query=query,
+            retrieval_query=retrieval_query,
+            session_id=session_id,
+            user_id=user_id,
+            history=history,
+            **context_kwargs,
+        )
+        context = result.get("context", {})
+        logger.bind(event="answer.completed").info(
+            "answer query completed",
+            project_id=project_id,
+            selected_page_count=len(context.get("pages", [])),
+            answer_chars=len(str(result.get("answer") or "")),
+            llm_error=result.get("llm_error"),
+            session_id=session_id,
+            agent_engine=result.get("agent_engine"),
+            total_ms=result.get("total_ms"),
+            retrieval_ms=result.get("retrieval_ms"),
+            llm_ms=result.get("llm_ms"),
+            retrieval_metrics=context.get("metrics", {}),
+            fallback_reasons=context.get("fallback_reasons", []),
+        )
+        return result

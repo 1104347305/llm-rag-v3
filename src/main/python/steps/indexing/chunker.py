@@ -211,5 +211,6 @@ class DocumentChunker:
         return output
 
 
-# 向后兼容
-chunk_page = DocumentChunker().chunk
+def chunk_page(page: Page, config: ChunkingConfig | None = None) -> list[Chunk]:
+    """兼容入口，支持按调用传入分块配置。"""
+    return DocumentChunker(config).chunk(page)

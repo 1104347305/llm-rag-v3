@@ -173,6 +173,26 @@ class Settings:
     )
     """DashScope LLM 对话 API 的基础 URL（OpenAI 兼容接口）。"""
 
+    internal_embedding_url: str = _config_str(
+        "internal_models", "embedding_url", "INTERNAL_EMBEDDING_URL", ""
+    )
+    """内网 embedding POST 地址。配置后优先于 DashScope embedding。"""
+
+    internal_rerank_url: str = _config_str(
+        "internal_models", "rerank_url", "INTERNAL_RERANK_URL", ""
+    )
+    """内网 rerank POST 地址。配置后优先于 DashScope rerank。"""
+
+    internal_model_timeout: int = _config_int(
+        "internal_models", "request_timeout", "INTERNAL_MODEL_TIMEOUT", 30
+    )
+    """内网 embedding/rerank HTTP 请求超时秒数。"""
+
+    internal_model_max_connections: int = _config_int(
+        "internal_models", "max_connections", "INTERNAL_MODEL_MAX_CONNECTIONS", 32
+    )
+    """内网模型共享 HTTP 客户端最大连接数。"""
+
     # ═══════════════════════════════════════════════════════
     # postgres — pgvector 向量数据库
     # ═══════════════════════════════════════════════════════
@@ -209,9 +229,18 @@ class Settings:
     es_index_prefix: str = _config_str("elasticsearch", "index_prefix", "ES_INDEX_PREFIX", "llm_wiki")
     """ES 索引名前缀。实际索引名为 {prefix}_pages / {prefix}_chunks / {prefix}_graph_edges。"""
 
+    es_analyzer: str = _config_str("elasticsearch", "analyzer", "ES_ANALYZER", "ik_max_word")
+    """ES 索引分词器（需安装 ik 插件）。"""
+
+    es_search_analyzer: str = _config_str("elasticsearch", "search_analyzer", "ES_SEARCH_ANALYZER", "ik_smart")
+    """ES 搜索分词器。"""
+
     # ═══════════════════════════════════════════════════════
     # features — 功能开关
     # ═══════════════════════════════════════════════════════
+    vector_store_type: str = _config_str("features", "vector_store_type", "VECTOR_STORE_TYPE", "faiss")
+    """向量存储后端选择: faiss=FAISS, pgvector=PostgreSQL pgvector。"""
+
     enable_vector_retrieval: bool = _config_bool("features", "enable_vector_retrieval", "ENABLE_VECTOR_RETRIEVAL", True)
     """是否启用 pgvector 语义检索。同时控制索引时的向量写入和检索时的语义召回。"""
 
@@ -220,6 +249,12 @@ class Settings:
 
     enable_local_lexical_retrieval: bool = _config_bool("features", "enable_local_lexical_retrieval", "ENABLE_LOCAL_LEXICAL_RETRIEVAL", True)
     """是否启用本地词汇回退（SQLite FTS5 + 中文分词）。在 ES 和 pgvector 均不可用时作为兜底方案。"""
+
+    # ═══════════════════════════════════════════════════════
+    # scenarios — 多场景配置
+    # ═══════════════════════════════════════════════════════
+    scenarios: dict[str, dict[str, Any]] = _YAML_CONFIG.get("scenarios", {})
+    """多场景配置，key 为 source（project_id），value 为覆盖的配置项。"""
 
     # ═══════════════════════════════════════════════════════
     # indexing — 索引构建参数
@@ -290,6 +325,26 @@ class Settings:
     max_message_chars: int = _config_int("server", "max_message_chars", "RAG_MAX_MESSAGE_CHARS", 32000)
     """单条 ChatMessage.content 最大字符数。"""
 
+    overload_wait_seconds: float = float(
+        _config_value("server", "overload_wait_seconds", "RAG_OVERLOAD_WAIT_SECONDS", 0.05)
+    )
+    """外部服务并发槽等待时间；超时后快速返回 503。"""
+
+    max_concurrent_chat: int = _config_int(
+        "server", "max_concurrent_chat", "RAG_MAX_CONCURRENT_CHAT", 16
+    )
+    """单进程允许的并发 Chat/流式 Chat 调用数。"""
+
+    max_concurrent_embedding: int = _config_int(
+        "server", "max_concurrent_embedding", "RAG_MAX_CONCURRENT_EMBEDDING", 16
+    )
+    """单进程允许的并发 embedding 调用数。"""
+
+    max_concurrent_rerank: int = _config_int(
+        "server", "max_concurrent_rerank", "RAG_MAX_CONCURRENT_RERANK", 8
+    )
+    """单进程允许的并发 rerank 调用数。"""
+
     # ═══════════════════════════════════════════════════════
     # session — 会话管理
     # ═══════════════════════════════════════════════════════
@@ -303,6 +358,10 @@ class Settings:
     """build_retrieval_query 取最近 N 条用户消息。"""
 
     # ═══════════════════════════════════════════════════════
+    # faiss — FAISS 向量存储
+    faiss_index_type: str = _config_str("faiss", "index_type", "FAISS_INDEX_TYPE", "FlatIP")
+    """FAISS 索引类型：FlatIP=精确内积搜索。"""
+
     # dashscope — 重试与超时参数
     # ═══════════════════════════════════════════════════════
     dashscope_max_retries: int = _config_int("dashscope", "max_retries", "DASHSCOPE_MAX_RETRIES", 3)
@@ -314,7 +373,7 @@ class Settings:
     dashscope_request_timeout: int = _config_int("dashscope", "request_timeout", "DASHSCOPE_REQUEST_TIMEOUT", 60)
     """单次 DashScope HTTP 请求超时秒数。"""
 
-    embedding_batch_size: int = _config_int("dashscope", "embedding_batch_size", "EMBEDDING_BATCH_SIZE", 25)
+    embedding_batch_size: int = _config_int("dashscope", "embedding_batch_size", "EMBEDDING_BATCH_SIZE", 10)
     """批量嵌入时每次 API 调用的最大文本数。"""
 
     fallback_embedding_dim: int = _config_int("dashscope", "fallback_embedding_dim", "FALLBACK_EMBEDDING_DIM", 384)
@@ -492,7 +551,7 @@ class Settings:
 
     rewrite_timeout: int = _config_int("prompts", "rewrite_timeout", "REWRITE_TIMEOUT", 10)
 
-    rewrite_model: str = _config_str("prompts", "rewrite_model", "REWRITE_MODEL", "qwen-plus")
+    rewrite_model: str = _config_str("prompts", "rewrite_model", "REWRITE_MODEL", "qwen-turbo")
 
     query_rewrite_system_prompt: str = _config_str(
         "prompts", "query_rewrite_system",
@@ -567,10 +626,22 @@ class Settings:
         return f"{self.es_index_prefix}_graph_edges"
 
     @property
-    def pg_dsn(self) -> str:
-        """PostgreSQL 连接字符串（DSN 格式）。"""
-        return f"postgresql://{self.pg_user}:{self.pg_password}@{self.pg_host}:{self.pg_port}/{self.pg_database}"
+    def faiss_enabled(self) -> bool:
+        return self.vector_store_type == "faiss" and self.enable_vector_retrieval
 
+    @property
+    def pgvector_enabled(self) -> bool:
+        return self.vector_store_type == "pgvector" and bool(self.pg_host) and self.enable_vector_retrieval
+
+    @property
+    def vector_store_enabled(self) -> bool:
+        if self.vector_store_type == "pgvector":
+            return self.pgvector_enabled
+        return self.faiss_enabled
+
+    @property
+    def pg_dsn(self) -> str:
+        return f"postgresql://{self.pg_user}:{self.pg_password}@{self.pg_host}:{self.pg_port}/{self.pg_database}"
 
 # 全局单例
 settings = Settings()

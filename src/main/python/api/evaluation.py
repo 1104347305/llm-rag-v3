@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import asyncio
 from fastapi import APIRouter, BackgroundTasks, File, Form, HTTPException, UploadFile
 from fastapi.responses import HTMLResponse, PlainTextResponse, Response
 
@@ -19,7 +20,7 @@ router = APIRouter(prefix="/evaluation", tags=["evaluation"])
 
 
 @router.get("", response_class=HTMLResponse)
-def evaluation_page() -> str:
+async def evaluation_page() -> str:
     return _EVALUATION_HTML
 
 
@@ -34,7 +35,8 @@ async def create_job_endpoint(
     if not content:
         raise HTTPException(status_code=400, detail="上传文件为空")
     try:
-        job_id = create_evaluation_job(
+        job_id = await asyncio.to_thread(
+            create_evaluation_job,
             file.filename or "evaluation.csv",
             content,
             {"name": name, "allow_local_fallback": allow_local_fallback},
@@ -46,13 +48,13 @@ async def create_job_endpoint(
 
 
 @router.get("/jobs")
-def list_jobs_endpoint() -> dict[str, object]:
-    return {"jobs": list_jobs()}
+async def list_jobs_endpoint() -> dict[str, object]:
+    return {"jobs": await asyncio.to_thread(list_jobs)}
 
 
 @router.get("/config")
-def config_endpoint() -> dict[str, object]:
-    config = minimax_config()
+async def config_endpoint() -> dict[str, object]:
+    config = await asyncio.to_thread(minimax_config)
     return {
         "judge": "dashscope-minimax",
         "minimax_configured": bool(config.api_key),
@@ -65,39 +67,43 @@ def config_endpoint() -> dict[str, object]:
 
 
 @router.get("/jobs/{job_id}")
-def get_job_endpoint(job_id: str) -> dict[str, object]:
-    job = get_job(job_id)
+async def get_job_endpoint(job_id: str) -> dict[str, object]:
+    job = await asyncio.to_thread(get_job, job_id)
     if job is None:
         raise HTTPException(status_code=404, detail="evaluation job not found")
     return job
 
 
 @router.get("/jobs/{job_id}/items")
-def get_items_endpoint(job_id: str, limit: int = 500, offset: int = 0) -> dict[str, object]:
-    if get_job(job_id) is None:
+async def get_items_endpoint(job_id: str, limit: int = 500, offset: int = 0) -> dict[str, object]:
+    if await asyncio.to_thread(get_job, job_id) is None:
         raise HTTPException(status_code=404, detail="evaluation job not found")
-    return {"items": get_items(job_id, limit=limit, offset=offset)}
+    return {
+        "items": await asyncio.to_thread(
+            get_items, job_id, limit=limit, offset=offset
+        )
+    }
 
 
 @router.post("/jobs/{job_id}/resume")
-def resume_job_endpoint(job_id: str, background_tasks: BackgroundTasks) -> dict[str, object]:
-    if get_job(job_id) is None:
+async def resume_job_endpoint(job_id: str, background_tasks: BackgroundTasks) -> dict[str, object]:
+    if await asyncio.to_thread(get_job, job_id) is None:
         raise HTTPException(status_code=404, detail="evaluation job not found")
     background_tasks.add_task(run_evaluation_job, job_id)
     return {"job_id": job_id, "status": "evaluating"}
 
 
 @router.post("/jobs/{job_id}/pause")
-def pause_job_endpoint(job_id: str) -> dict[str, object]:
-    if not pause_evaluation_job(job_id):
+async def pause_job_endpoint(job_id: str) -> dict[str, object]:
+    if not await asyncio.to_thread(pause_evaluation_job, job_id):
         raise HTTPException(status_code=404, detail="evaluation job not found")
     return {"job_id": job_id, "status": "paused"}
 
 
 @router.get("/jobs/{job_id}/report.md")
-def download_markdown_report(job_id: str) -> PlainTextResponse:
+async def download_markdown_report(job_id: str) -> PlainTextResponse:
     try:
-        report = build_markdown_report(job_id)
+        report = await asyncio.to_thread(build_markdown_report, job_id)
     except ValueError as exc:
         raise HTTPException(status_code=404, detail=str(exc)) from exc
     headers = {"Content-Disposition": f'attachment; filename="evaluation-{job_id}.md"'}
@@ -105,10 +111,10 @@ def download_markdown_report(job_id: str) -> PlainTextResponse:
 
 
 @router.get("/jobs/{job_id}/results.csv")
-def download_csv_results(job_id: str) -> Response:
-    if get_job(job_id) is None:
+async def download_csv_results(job_id: str) -> Response:
+    if await asyncio.to_thread(get_job, job_id) is None:
         raise HTTPException(status_code=404, detail="evaluation job not found")
-    csv_text = build_csv_export(job_id)
+    csv_text = await asyncio.to_thread(build_csv_export, job_id)
     headers = {"Content-Disposition": f'attachment; filename="evaluation-{job_id}.csv"'}
     return Response(csv_text, media_type="text/csv; charset=utf-8", headers=headers)
 

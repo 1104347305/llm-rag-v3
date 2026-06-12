@@ -68,6 +68,11 @@ export EMBEDDING_MODEL=text-embedding-v4
 export RERANK_MODEL=qwen3-rerank
 export LLM_MODEL=qwen-plus
 
+# 内网模型（配置后 embedding/rerank 优先走内网 HTTP）
+export INTERNAL_EMBEDDING_URL=http://embedding-service/embedding
+export INTERNAL_RERANK_URL=http://rerank-service/rerank
+export INTERNAL_MODEL_TIMEOUT=30
+
 # 功能开关
 export ENABLE_ES_RETRIEVAL=false
 export ENABLE_VECTOR_RETRIEVAL=false

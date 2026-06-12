@@ -23,10 +23,10 @@ from src.main.python.config import settings
 
 _CONFIGURED = False
 
-# Loguru 格式模板：extra 字段通过 {extra[name]} {extra[event]} 引用
+# Loguru 格式模板：{name} 为内置模块名
 _FMT = (
-    "{time:YYYY-MM-DD HH:mm:ss.SSS} | {level: <8} | {extra[name]: <24} |"
-    " {extra[event]: <32} | {message}"
+    "{time:YYYY-MM-DD HH:mm:ss.SSS} | {level: <8} | {name: <32} |"
+    " {message}"
 )
 
 

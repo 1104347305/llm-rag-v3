@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import argparse
+import asyncio
 import json
 from pathlib import Path
 
@@ -9,7 +10,7 @@ from src.main.python.config import settings
 from src.main.python.services import get_rag_service
 
 
-def main() -> None:
+async def _amain() -> None:
     parser = argparse.ArgumentParser(description="Local RAG index and query CLI.")
     subparsers = parser.add_subparsers(dest="command", required=True)
 
@@ -66,10 +67,10 @@ def main() -> None:
     rag_service = get_rag_service()
 
     if args.command == "index":
-        result = rag_service.index_project(args.project_id, Path(args.path), force=args.force, build_embeddings=args.build_embeddings)
+        result = await rag_service.index_project(args.project_id, Path(args.path), force=args.force, build_embeddings=args.build_embeddings)
         print(json.dumps(result, ensure_ascii=False, indent=2))
     elif args.command == "process-data":
-        result = rag_service.index_project(args.project_id, Path(args.path), force=args.force, build_embeddings=args.build_embeddings)
+        result = await rag_service.index_project(args.project_id, Path(args.path), force=args.force, build_embeddings=args.build_embeddings)
         print(json.dumps(result, ensure_ascii=False, indent=2))
     elif args.command == "config":
         print(json.dumps({
@@ -93,7 +94,7 @@ def main() -> None:
             "sqlite_fts5_available": sqlite_fts5_available(),
         }, ensure_ascii=False, indent=2))
     elif args.command == "query":
-        result = rag_service.retrieve_context(
+        result = await rag_service.retrieve_context(
             args.project_id, args.query,
             top_pages=args.top_pages, max_context_size=args.max_context_size,
             bm25_top_k=args.bm25_top_k, vector_top_k=args.vector_top_k,
@@ -106,7 +107,7 @@ def main() -> None:
         print(json.dumps(result, ensure_ascii=False, indent=2))
     elif args.command == "answer":
         history = json.loads(args.history_json) if args.history_json else None
-        result = rag_service.answer_query(
+        result = await rag_service.answer_query(
             args.project_id, args.query,
             session_id=args.session_id, user_id=args.user_id, history=history,
             top_pages=args.top_pages, max_context_size=args.max_context_size,
@@ -117,6 +118,10 @@ def main() -> None:
             include_lexical=False if args.no_lexical else None,
         )
         print(json.dumps(result, ensure_ascii=False, indent=2))
+
+
+def main() -> None:
+    asyncio.run(_amain())
 
 
 if __name__ == "__main__":

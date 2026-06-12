@@ -9,9 +9,9 @@
 from __future__ import annotations
 
 import argparse
+import asyncio
 import json
 import re
-import subprocess
 import sys
 from datetime import datetime, timezone
 from pathlib import Path
@@ -56,11 +56,11 @@ updated_at: {date}
 """
 
 
-def main() -> None:
+async def main() -> None:
     args = parse_args()
 
     # 1. 提取 PDF 文本
-    text = extract_pdf_text(args.pdf)
+    text = await extract_pdf_text(args.pdf)
 
     # 2. 识别表格区块
     fallback_title = Path(args.pdf).stem
@@ -88,7 +88,7 @@ def main() -> None:
         summary = f"{title}，{len(rows)}行，费率范围{min(values):.0f}~{max(values):.0f}元"
 
         # 5. 写入存储
-        _write_to_store(args, table_id, title, dimensions, rows, now_str)
+        await _write_to_store(args, table_id, title, dimensions, rows, now_str)
 
         # 6. 生成 Wiki 页面
         wiki_path = f"wiki/entities/{_safe_id(table_id)}.md"
@@ -102,8 +102,8 @@ def main() -> None:
             table_structure=_build_structure(dimensions),
             dimension_values=_build_dim_values(dimensions, dim_values),
         )
-        Path(wiki_path).parent.mkdir(parents=True, exist_ok=True)
-        Path(wiki_path).write_text(wiki_content, encoding="utf-8")
+        await asyncio.to_thread(Path(wiki_path).parent.mkdir, parents=True, exist_ok=True)
+        await asyncio.to_thread(Path(wiki_path).write_text, wiki_content, encoding="utf-8")
         print(f"  Wiki: {wiki_path} ({len(rows)} rows)")
 
 
@@ -116,13 +116,17 @@ def parse_args() -> argparse.Namespace:
     return p.parse_args()
 
 
-def extract_pdf_text(pdf_path: str) -> str:
+async def extract_pdf_text(pdf_path: str) -> str:
     """调用 pdftotext 提取文本。"""
-    result = subprocess.run(
-        ["pdftotext", "-layout", pdf_path, "-"],
-        capture_output=True, text=True,
+    process = await asyncio.create_subprocess_exec(
+        "pdftotext", "-layout", pdf_path, "-",
+        stdout=asyncio.subprocess.PIPE,
+        stderr=asyncio.subprocess.PIPE,
     )
-    return result.stdout
+    stdout, stderr = await process.communicate()
+    if process.returncode != 0:
+        raise RuntimeError(stderr.decode("utf-8", errors="replace"))
+    return stdout.decode("utf-8")
 
 
 def split_tables(text: str, fallback_title: str = "") -> list[dict[str, Any]]:
@@ -303,11 +307,11 @@ def _build_dim_values(dimensions: list[str],
     return "\n".join(lines)
 
 
-def _write_to_store(args: argparse.Namespace, table_id: str, title: str,
+async def _write_to_store(args: argparse.Namespace, table_id: str, title: str,
                     dimensions: list[str], rows: list[dict[str, Any]],
                     date: str) -> None:
     """写入 TabularStore。"""
-    from src.main.python.storage.tabular_store import TabularStore
+    from src.main.python.steps.stores.tabular_store import TabularStore
 
     # 只有 gender 作为额外维时，从 table_id 中提取
     if "男性" in title or "男性" in table_id:
@@ -319,8 +323,9 @@ def _write_to_store(args: argparse.Namespace, table_id: str, title: str,
             r["gender"] = "女"
         dimensions = ["gender"] + dimensions
 
-    TabularStore().init_schema()
-    TabularStore().upsert_table(
+    store = TabularStore()
+    await store.init_schema()
+    await store.upsert_table(
         table_id=table_id,
         title=title,
         unit=args.unit,
@@ -331,4 +336,4 @@ def _write_to_store(args: argparse.Namespace, table_id: str, title: str,
 
 
 if __name__ == "__main__":
-    main()
+    asyncio.run(main())

@@ -20,9 +20,9 @@ except ImportError:
     HAS_OPENPYXL = False
 
 
-DEFAULT_STREAM_URL = "http://localhost:8010/rag/answer/stream"
+DEFAULT_STREAM_URL = "http://localhost:8010/rag/chat/stream"
 DEFAULT_JSON_URL = "http://localhost:8010/rag/answer"
-DEFAULT_PROJECT_ID = "wiki"
+DEFAULT_PROJECT_ID = "quanyi_wiki"
 CITATION_PATTERN = re.compile(r"(?<!\w)\[(\d+)\]")
 HIDDEN_CITED_PATTERN = re.compile(r"<!--\s*cited:\s*([0-9,\s]+)\s*-->", re.IGNORECASE)
 
@@ -85,7 +85,7 @@ def parse_args() -> argparse.Namespace:
     parser = argparse.ArgumentParser(
         description="Concurrently call /rag/answer/stream and save query, answer, TTFT, total time, citations, and raw metadata."
     )
-    parser.add_argument("--input", default='/Users/mickey/project/PA-ALG/llm-wiki-rag/docs/评估集.xlsx', help="Input file: .txt, .csv, .jsonl, .json, or .xlsx.")
+    parser.add_argument("--input", default='/Users/mickey/project/PA-ALG/llm-wiki-rag/docs/权益评估集.xlsx', help="Input file: .txt, .csv, .jsonl, .json, or .xlsx.")
     parser.add_argument(
         "--output",
         default="outputs/rag_answer_results.jsonl",
@@ -93,10 +93,10 @@ def parse_args() -> argparse.Namespace:
     )
     parser.add_argument(
         "--excel-output",
-        default="/Users/mickey/project/PA-ALG/llm-wiki-rag/docs/评估集_result.xlsx",
+        default="/Users/mickey/project/PA-ALG/llm-wiki-rag/docs/权益评估集_result.xlsx",
         help="Excel output path. A timestamp is appended before the extension.",
     )
-    parser.add_argument("--url", default="http://localhost:8010/rag/answer/stream", help="Endpoint URL. Defaults to stream or json URL according to --mode.")
+    parser.add_argument("--url", default="http://localhost:8010/rag/chat/stream", help="Endpoint URL. Defaults to stream or json URL according to --mode.")
     parser.add_argument("--mode", choices=["stream", "json"], default="stream", help="Use SSE streaming endpoint or legacy JSON endpoint.")
     parser.add_argument("--workers", type=int, default=4, help="Concurrent request count.")
     parser.add_argument("--project-id", default=DEFAULT_PROJECT_ID, help="RAG project_id for every request.")
@@ -234,8 +234,14 @@ def collect_one_stream(
     timeout: float,
     payload_overrides: dict[str, Any],
 ) -> dict[str, Any]:
-    # "session_id": "890128912989280198021000",
-    payload = {"project_id": project_id, "user_id": "11209009090", "query": query, **payload_overrides}
+    payload = {
+        "source": project_id,
+        "user_text": query,
+        "session_id": f"11111111",
+        "user_id": "eval_user",
+        "trace_id": f"2222222",
+        **payload_overrides,
+    }
     started = time.perf_counter()
     status_code: int | None = None
     error: str | None = None
@@ -246,8 +252,8 @@ def collect_one_stream(
     event_count = 0
 
     try:
-        request = build_json_request(url, payload, accept="text/event-stream")
-        with urlopen(request, timeout=timeout) as response:
+        req = build_json_request(url, payload, accept="text/event-stream")
+        with urlopen(req, timeout=timeout) as response:
             status_code = response.status
             response_open_ms = elapsed_ms_since(started)
             for event in iter_sse_events(response):
@@ -256,8 +262,9 @@ def collect_one_stream(
                     first_event_ms = now_ms
                 event_count += 1
 
-                answer = str(event.get("answer") or "")
-                if answer and client_ttft_ms is None:
+                data = event.get("data", {}) if isinstance(event.get("data"), dict) else {}
+                robot_text = str(data.get("robot_text") or "")
+                if robot_text and client_ttft_ms is None:
                     client_ttft_ms = now_ms
 
                 last_event = event
@@ -268,28 +275,21 @@ def collect_one_stream(
         error = str(exc)
 
     total_elapsed_ms = elapsed_ms_since(started)
-    answer = str(last_event.get("answer") or "")
     row = build_result_row(
         input_index=index,
         query=query,
         elapsed_ms=total_elapsed_ms,
         status_code=status_code,
-        response_data=last_event,
+        response_event=last_event,
         error=error,
     )
-    row.update(
-        {
-            "mode": "stream",
-            "client_response_open_ms": response_open_ms,
-            "client_first_event_ms": first_event_ms,
-            "client_ttft_ms": client_ttft_ms,
-            "server_total_ms": last_event.get("total_ms"),
-            "server_retrieval_ms": last_event.get("retrieval_ms"),
-            "server_llm_ms": last_event.get("llm_ms"),
-            "event_count": event_count,
-            "answer_chars": len(answer),
-        }
-    )
+    row.update({
+        "mode": "stream",
+        "client_response_open_ms": response_open_ms,
+        "client_first_event_ms": first_event_ms,
+        "client_ttft_ms": client_ttft_ms,
+        "event_count": event_count,
+    })
     return row
 
 
@@ -301,7 +301,14 @@ def collect_one_json(
     timeout: float,
     payload_overrides: dict[str, Any],
 ) -> dict[str, Any]:
-    payload = {"project_id": project_id, "query": query, **payload_overrides}
+    payload = {
+        "source": project_id,
+        "user_text": query,
+        "session_id": f"11111111",
+        "user_id": "eval_user",
+        "trace_id": f"2222222",
+        **payload_overrides,
+    }
     started = time.perf_counter()
     status_code: int | None = None
     response_data: dict[str, Any] = {}
@@ -309,8 +316,8 @@ def collect_one_json(
     response_open_ms: float | None = None
 
     try:
-        request = build_json_request(url, payload, accept="application/json")
-        with urlopen(request, timeout=timeout) as response:
+        req = build_json_request(url, payload, accept="application/json")
+        with urlopen(req, timeout=timeout) as response:
             status_code = response.status
             response_open_ms = elapsed_ms_since(started)
             response_data = json.loads(response.read().decode("utf-8"))
@@ -326,22 +333,16 @@ def collect_one_json(
         query=query,
         elapsed_ms=total_elapsed_ms,
         status_code=status_code,
-        response_data=response_data,
+        response_event={"data": response_data.get("data", {})},
         error=error,
     )
-    row.update(
-        {
-            "mode": "json",
-            "client_response_open_ms": response_open_ms,
-            "client_first_event_ms": None,
-            "client_ttft_ms": None,
-            "server_total_ms": response_data.get("total_ms"),
-            "server_retrieval_ms": response_data.get("retrieval_ms"),
-            "server_llm_ms": response_data.get("llm_ms"),
-            "event_count": None,
-            "answer_chars": len(str(response_data.get("answer") or "")),
-        }
-    )
+    row.update({
+        "mode": "json",
+        "client_response_open_ms": response_open_ms,
+        "client_first_event_ms": None,
+        "client_ttft_ms": None,
+        "event_count": None,
+    })
     return row
 
 
@@ -382,16 +383,14 @@ def build_result_row(
     query: str,
     elapsed_ms: float,
     status_code: int | None,
-    response_data: dict[str, Any],
+    response_event: dict[str, Any],
     error: str | None,
 ) -> dict[str, Any]:
-    answer = str(response_data.get("answer") or "")
-    context = response_data.get("context") if isinstance(response_data.get("context"), dict) else {}
-    # 改写 query：同步在顶层，流式在 context 内
-    rewritten_query = response_data.get("rewritten_query") or ""
-    if not rewritten_query:
-        rewritten_query = context.get("rewritten_query") or ""
-    pages = context.get("pages") if isinstance(context.get("pages"), list) else []
+    data = response_event.get("data", {}) if isinstance(response_event.get("data"), dict) else {}
+    answer = str(data.get("robot_text") or "")
+    extra = data.get("extra_output_params", {}) if isinstance(data.get("extra_output_params"), dict) else {}
+    rewritten_query = extra.get("rewritten_query") or ""
+    pages = extra.get("pages") if isinstance(extra.get("pages"), list) else []
     citations = extract_citations(pages)
     cited_numbers = extract_cited_numbers(answer)
     cited_pages = [item for item in citations if item.get("number") in cited_numbers]
@@ -404,15 +403,18 @@ def build_result_row(
         "ok": error is None and status_code is not None and 200 <= status_code < 300,
         "status_code": status_code,
         "error": error,
-        "llm_error": response_data.get("llm_error"),
-        "session_id": response_data.get("session_id"),
-        "agent_engine": response_data.get("agent_engine"),
+        "llm_error": None,
+        "session_id": None,
+        "agent_engine": "askbob",
         "cited_numbers": cited_numbers,
         "cited_pages": cited_pages,
         "citations": citations,
-        "fallback_reasons": context.get("fallback_reasons", []),
-        "metrics": context.get("metrics", {}),
-        "raw_response": response_data,
+        "fallback_reasons": [],
+        "server_total_ms": extra.get("final_frame_time"),
+        "server_retrieval_ms": extra.get("first_frame_time"),
+        "server_llm_ms": None,
+        "metrics": extra.get("metrics", {}),
+        "raw_response": response_event,
     }
 
 

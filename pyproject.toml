@@ -2,11 +2,12 @@
 name = "llm-wiki-rag"
 version = "0.1.0"
 description = "Local-first production RAG prototype for markdown knowledge bases."
-requires-python = ">=3.11"
+requires-python = ">=3.10"
 dependencies = [
   "agno>=2.0",
   "openai>=1.0",
   "requests>=2.31",
+  "httpx>=0.27",
 ]
 
 [project.optional-dependencies]
@@ -19,7 +20,17 @@ api = [
   "pyyaml>=6.0",
   "loguru>=0.7",
 ]
+faiss = [
+  "faiss-cpu>=1.8",
+]
+pgvector = [
+  "psycopg2-binary>=2.9",
+]
+elasticsearch = [
+  "elasticsearch>=8.0",
+]
 
 [tool.pytest.ini_options]
 pythonpath = ["."]
 testpaths = ["tests"]
+asyncio_default_fixture_loop_scope = "function"

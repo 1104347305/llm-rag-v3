@@ -1,0 +1,203 @@
+"""表格数据存储与查询。
+
+支持多维费率表的存储（SQLite）和精确查找。
+wiki 实体页只存表头描述，具体数值通过 lookup 工具查询。
+"""
+from __future__ import annotations
+
+import asyncio
+import sqlite3
+from contextlib import closing
+from pathlib import Path
+from typing import Any
+
+from src.main.python.config import settings
+from loguru import logger
+
+
+
+class TabularStore:
+    """多维表格数据存储。
+
+    每张表由维度列 + 值列组成，存入 SQLite 后通过精确匹配查询。
+    """
+
+    def __init__(self) -> None:
+        self._path = settings.storage_dir / "tabular.db"
+
+    @property
+    def path(self) -> Path:
+        self._path.parent.mkdir(parents=True, exist_ok=True)
+        return self._path
+
+    def _connect(self) -> sqlite3.Connection:
+        conn = sqlite3.connect(str(self.path))
+        conn.row_factory = sqlite3.Row
+        conn.execute("pragma journal_mode=wal")
+        conn.execute("pragma synchronous=normal")
+        conn.execute(f"pragma busy_timeout={settings.sqlite_busy_timeout}")
+        return conn
+
+    async def init_schema(self) -> None:
+        """初始化 Parquet 表结构。"""
+        await asyncio.to_thread(self._init_schema_sync)
+
+    def _init_schema_sync(self) -> None:
+        with closing(self._connect()) as conn:
+            conn.executescript("""
+                create table if not exists tabular_meta (
+                    table_id   text primary key,
+                    title      text not null,
+                    unit       text not null,
+                    dimensions text not null,   -- JSON array of dim names
+                    wiki_path  text,             -- 对应的 wiki entity 路径
+                    remarks    text
+                );
+                create table if not exists tabular_data (
+                    table_id text not null,
+                    dims     text not null,       -- JSON object of dim values
+                    value    real not null,
+                    primary key (table_id, dims)
+                );
+            """)
+            conn.commit()
+
+    async def upsert_table(self, table_id: str, title: str, unit: str,
+                     dimensions: list[str], rows: list[dict[str, Any]],
+                     wiki_path: str = "", remarks: str = "") -> None:
+        """写入一张表的数据。
+
+        Args:
+            table_id: 表唯一标识，如 "rate.zhiying26.male"
+            title: 表标题
+            unit: 数值单位
+            dimensions: 维度名列表，如 ["gender", "age", "period"]
+            rows: 每行 {dim1: val1, ..., "value": rate}
+        """
+        await asyncio.to_thread(
+            self._upsert_table_sync, table_id, title, unit, dimensions, rows,
+            wiki_path, remarks,
+        )
+
+    def _upsert_table_sync(self, table_id: str, title: str, unit: str,
+                           dimensions: list[str], rows: list[dict[str, Any]],
+                           wiki_path: str, remarks: str) -> None:
+        import json as _json
+        with closing(self._connect()) as conn:
+            conn.execute(
+                "insert or replace into tabular_meta values(?,?,?,?,?,?)",
+                (table_id, title, unit, _json.dumps(dimensions, ensure_ascii=False),
+                 wiki_path, remarks),
+            )
+            conn.executemany(
+                "insert or replace into tabular_data values(?,?,?)",
+                [
+                    (table_id,
+                     _json.dumps({k: v for k, v in row.items() if k != "value"},
+                                 ensure_ascii=False, sort_keys=True),
+                     row["value"])
+                    for row in rows
+                ],
+            )
+            conn.commit()
+
+    async def lookup(self, table_id: str, **dims: object) -> dict[str, Any] | None:
+        """精确查找一个值。
+
+        Returns:
+            {"value": 335, "unit": "每万元基本保险金额"} 或 None
+        """
+        return await asyncio.to_thread(self._lookup_sync, table_id, dims)
+
+    def _lookup_sync(self, table_id: str, dims: dict[str, object]) -> dict[str, Any] | None:
+        import json as _json
+        dims_json = _json.dumps(
+            {k: str(v) for k, v in sorted(dims.items())},
+            ensure_ascii=False, sort_keys=True,
+        )
+        with closing(self._connect()) as conn:
+            conn.row_factory = sqlite3.Row
+            row = conn.execute(
+                "select d.value, m.unit, m.title "
+                "from tabular_data d join tabular_meta m on d.table_id = m.table_id "
+                "where d.table_id = ? and d.dims = ?",
+                (table_id, dims_json),
+            ).fetchone()
+        if row is None:
+            return None
+        return {"value": row["value"], "unit": row["unit"], "title": row["title"]}
+
+    async def search_rows(self, table_id: str, **filters: object) -> list[dict[str, Any]]:
+        """按条件搜索多行。filters 支持 {age: 18} 即只筛选年龄=18的所有行。"""
+        return await asyncio.to_thread(self._search_rows_sync, table_id, filters)
+
+    def _search_rows_sync(self, table_id: str, filters: dict[str, object]) -> list[dict[str, Any]]:
+        import json as _json
+        with closing(self._connect()) as conn:
+            conn.row_factory = sqlite3.Row
+            rows = conn.execute(
+                "select dims, value from tabular_data where table_id = ?", (table_id,)
+            ).fetchall()
+        results = []
+        for row in rows:
+            dims_dict = _json.loads(row["dims"])
+            if filters and not all(str(dims_dict.get(k)) == str(v) for k, v in filters.items()):
+                continue
+            results.append({**dims_dict, "value": row["value"]})
+        return results
+
+    async def get_meta(self, table_id: str) -> dict[str, Any] | None:
+        """获取表的元信息。"""
+        return await asyncio.to_thread(self._get_meta_sync, table_id)
+
+    def _get_meta_sync(self, table_id: str) -> dict[str, Any] | None:
+        with closing(self._connect()) as conn:
+            conn.row_factory = sqlite3.Row
+            row = conn.execute(
+                "select * from tabular_meta where table_id = ?", (table_id,)
+            ).fetchone()
+        if row is None:
+            return None
+        import json as _json
+        return {
+            "table_id": row["table_id"],
+            "title": row["title"],
+            "unit": row["unit"],
+            "dimensions": _json.loads(row["dimensions"]),
+            "wiki_path": row["wiki_path"],
+            "remarks": row["remarks"],
+        }
+
+    async def list_tables(self) -> list[dict[str, Any]]:
+        """列出所有表。"""
+        return await asyncio.to_thread(self._list_tables_sync)
+
+    def _list_tables_sync(self) -> list[dict[str, Any]]:
+        with closing(self._connect()) as conn:
+            conn.row_factory = sqlite3.Row
+            rows = conn.execute("select * from tabular_meta").fetchall()
+        import json as _json
+        return [
+            {
+                "table_id": r["table_id"],
+                "title": r["title"],
+                "unit": r["unit"],
+                "dimensions": _json.loads(r["dimensions"]),
+                "wiki_path": r["wiki_path"],
+            }
+            for r in rows
+        ]
+
+
+    # ── 工具方法（LLM 可调用）──────────────────────────
+
+    async def lookup_rate(self, product: str, gender: str, age: int, period: str) -> dict[str, Any]:
+        table_id = f"rate.{product}.{gender}"
+        result = await self.lookup(table_id, age=str(age), period=period)
+        if result is None:
+            return {"error": f"未找到 {product} {gender}性 {age}岁 {period} 的费率"}
+        return result
+
+    async def describe_tables(self) -> list[dict[str, Any]]:
+        """列出所有可用的表格，供 LLM 了解有什么表可以查。"""
+        return await self.list_tables()

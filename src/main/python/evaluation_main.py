@@ -27,11 +27,11 @@ def create_evaluation_app() -> FastAPI:
     app.include_router(evaluation_router)
 
     @app.get("/")
-    def root() -> dict[str, str]:
+    async def root() -> dict[str, str]:
         return {"service": "QA Evaluation System", "version": "0.1.0"}
 
     @app.get("/health")
-    def health() -> dict[str, object]:
+    async def health() -> dict[str, object]:
         config = minimax_config()
         return {
             "status": "ok",

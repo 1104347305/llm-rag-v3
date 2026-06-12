@@ -6,10 +6,14 @@ services:
     environment:
       - ENV=${ENV:-prd}
       - DASHSCOPE_API_KEY=${DASHSCOPE_API_KEY:-}
+      - INTERNAL_EMBEDDING_URL=${INTERNAL_EMBEDDING_URL:-}
+      - INTERNAL_RERANK_URL=${INTERNAL_RERANK_URL:-}
+      - INTERNAL_MODEL_TIMEOUT=${INTERNAL_MODEL_TIMEOUT:-30}
       - ES_URL=${ES_URL:-http://es:9200}
       - ES_USER=${ES_USER:-}
       - ES_PASSWORD=${ES_PASSWORD:-}
       - ENABLE_ES_RETRIEVAL=${ENABLE_ES_RETRIEVAL:-true}
+      - VECTOR_STORE_TYPE=${VECTOR_STORE_TYPE:-faiss}
       - PG_HOST=${PG_HOST:-pg}
       - PG_PORT=${PG_PORT:-5432}
       - PG_DATABASE=${PG_DATABASE:-rag}
@@ -24,12 +28,15 @@ services:
       - ./.rag:/app/.rag
       - ./logs:/app/logs
     depends_on:
-      pg:
+      es:
         condition: service_healthy
     restart: unless-stopped
 
+  # PostgreSQL + pgvector（仅在 VECTOR_STORE_TYPE=pgvector 时需要）
   pg:
     image: pgvector/pgvector:pg17
+    profiles:
+      - pgvector
     ports:
       - "5432:5432"
     environment:

@@ -6,10 +6,9 @@ from __future__ import annotations
 
 from src.main.python.config import settings
 from src.main.python.steps.retrieval.base import BaseRetriever
-from src.main.python.db.elasticsearch import ElasticsearchClient, ElasticsearchUnavailable
-from src.main.python.utils.logging import get_logger
+from src.main.python.steps.stores.elasticsearch import ElasticsearchClient, ElasticsearchUnavailable
+from loguru import logger
 
-logger = get_logger(__name__)
 
 
 class EsRetriever(BaseRetriever):
@@ -23,26 +22,20 @@ class EsRetriever(BaseRetriever):
         results = retriever.search("保险条款", "my-project", top_k=100)
     """
 
-    def __init__(self, client: ElasticsearchClient | None = None) -> None:
+    def __init__(self) -> None:
         """初始化 ES 检索器。client 延迟获取，首次 search() 时才连接。
 
         Args:
             client: ES 客户端。为 None 时首次调用自动获取全局单例。
         """
-        self._client = client
+        self.esClient: ElasticsearchClient | None = None
 
     @property
     def is_available(self) -> bool:
         """ES 是否配置且可用。检查 settings.es_retrieval_enabled（URL + 功能开关）。"""
         return settings.es_retrieval_enabled
 
-    def _get_client(self) -> ElasticsearchClient:
-        """延迟获取 ES 客户端单例。"""
-        if self._client is None:
-            self._client = ElasticsearchClient.get()
-        return self._client
-
-    def search(self, query: str, project_id: str, top_k: int = 100) -> list[tuple[str, float]]:
+    async def search(self, query: str, project_id: str, top_k: int = 100) -> list[tuple[str, float]]:
         """BM25 词汇检索。
 
         Args:
@@ -56,4 +49,6 @@ class EsRetriever(BaseRetriever):
         Raises:
             ElasticsearchUnavailable: ES 不可用时抛出，调用方应捕获并降级。
         """
-        return self._get_client().search_chunks(project_id, query, top_k)
+        if self.esClient is None:
+            self.esClient = ElasticsearchClient.get()
+        return await self.esClient.search_chunks(project_id, query, top_k)

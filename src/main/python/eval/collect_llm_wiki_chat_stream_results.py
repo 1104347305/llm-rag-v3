@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import argparse
+import asyncio
 import csv
 import json
 import os
@@ -157,7 +158,7 @@ def chat_stream(
     }
 
 
-def main() -> None:
+def _main_sync() -> None:
     args = parse_args()
     global BASE_URL, PROJECT_PATH
     BASE_URL = args.base_url.rstrip("/")
@@ -212,6 +213,10 @@ def main() -> None:
     print(f"\n完成：{success_count}/{len(results)} 条成功，总耗时 {total_ms:.0f}ms")
     print(f"Excel：{output_path}")
     print(f"JSONL：{jsonl_path}")
+
+
+async def main() -> None:
+    await asyncio.to_thread(_main_sync)
 
 
 def parse_args() -> argparse.Namespace:
@@ -491,4 +496,4 @@ def stringify(value: Any) -> str:
 
 
 if __name__ == "__main__":
-    main()
+    asyncio.run(main())

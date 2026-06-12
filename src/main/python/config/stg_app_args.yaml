@@ -1,6 +1,10 @@
 server:
   host: "0.0.0.0"
   port: 8010
+  overload_wait_seconds: 0.05
+  max_concurrent_chat: 16
+  max_concurrent_embedding: 16
+  max_concurrent_rerank: 8
 
 paths:
   default_data_path: "data"
@@ -18,6 +22,12 @@ dashscope:
   embedding_base_url: "https://dashscope.aliyuncs.com/compatible-mode/v1"
   rerank_base_url: "https://dashscope.aliyuncs.com/compatible-api/v1"
   chat_base_url: "https://dashscope.aliyuncs.com/compatible-mode/v1"
+
+internal_models:
+  embedding_url: "${INTERNAL_EMBEDDING_URL:}"
+  rerank_url: "${INTERNAL_RERANK_URL:}"
+  request_timeout: 30
+  max_connections: 32
 
 elasticsearch:
   url: ""
